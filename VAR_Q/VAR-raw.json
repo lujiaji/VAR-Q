@@ -1,0 +1,25 @@
+{
+  "model": {
+    "depth": 30
+  },
+  "quantization": {
+    "enable": false
+  },
+  "inference": {
+    "device": "cuda",
+    "seed": 0,
+    "cfg": 2.0,
+    "top_k": 600,
+    "top_p": 0.95,
+    "more_smooth": false
+  },
+  "batch_processing": {
+    "total_iters": 1000,
+    "batch_size": 50
+  },
+  "checkpoints": {
+    "vae_ckpt": "YOUR_PATH/vae_ch160v4096z32.pth",
+    "var_ckpt_template": "YOUR_PATH/var_d{}.pth",
+    "hf_home": "https://huggingface.co/FoundationVision/var/resolve/main"
+  }
+}
