@@ -5,7 +5,7 @@ import torch
 from torch import distributed as tdist, nn as nn
 from torch.nn import functional as F
 
-import dist
+from .. import dist
 
 
 # this file only provides the VectorQuantizer2 used in VQVAE

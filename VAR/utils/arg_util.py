@@ -19,7 +19,7 @@ except ImportError as e:
     time.sleep(5)
     raise e
 
-import dist
+from .. import dist
 
 
 class Args(Tap):
