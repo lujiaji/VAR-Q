@@ -4,6 +4,7 @@ import torch, torchvision
 import random
 import argparse
 import numpy as np
+from ..VAR.utils.misc import create_npz_from_sample_folder
 import PIL.Image as PImage, PIL.ImageDraw as PImageDraw
 setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)     # disable default parameter init for faster speed
 setattr(torch.nn.LayerNorm, 'reset_parameters', lambda self: None)  # disable default parameter init for faster speed
@@ -16,6 +17,9 @@ parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--cfg", type=float, default=2.0)
 parser.add_argument("--top_k", type=int, default=600)
 parser.add_argument("--more_smooth", action="store_true", help="True for more smooth output")
+parser.add_argument("--total_iters", type=int, default=1000)
+parser.add_argument("--batch_size", type=int, default=50)
+parser.add_argument("--save_path", type=str, default='../Benchmark/output/VAR/images')
 args = parser.parse_args()
 
 model_depth = args.model_depth
@@ -54,12 +58,14 @@ print(f'prepare finished.')
 
 # set args
 seed = args.seed #@param {type:"number"}
-torch.manual_seed(seed)
 num_sampling_steps = 250 #@param {type:"slider", min:0, max:1000, step:1}
 cfg = args.cfg #@param {type:"slider", min:1, max:10, step:0.1}
 top_k = args.top_k #@param {type:"slider", min:600, max:900, step:1}
 class_labels = (980, 980, 437, 437, 22, 22, 562, 562)  #@param {type:"raw"}
 more_smooth = args.more_smooth # True for more smooth output
+images_per_iter = args.batch_size
+total_iters = args.total_iters
+save_path = args.save_path
 
 # seed
 torch.manual_seed(seed)
@@ -74,14 +80,26 @@ torch.backends.cudnn.allow_tf32 = bool(tf32)
 torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
 torch.set_float32_matmul_precision('high' if tf32 else 'highest')
 
-# sample
-B = len(class_labels)
-label_B: torch.LongTensor = torch.tensor(class_labels, device=device)
 with torch.inference_mode():
     with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):    # using bfloat16 can be faster
-        recon_B3HW = var.autoregressive_infer_cfg(B=B, label_B=label_B, cfg=cfg, top_k=top_k, top_p=0.95, g_seed=seed, more_smooth=more_smooth)
+        for step in range(total_iters):
+            print(f"Generating {images_per_iter} images for class {step}...")
+            label_B = torch.full((images_per_iter,), step, dtype=torch.long, device=device)
+            result = var.autoregressive_infer_cfg(
+                B = images_per_iter, 
+                label_B = label_B, 
+                cfg = cfg, 
+                top_k = top_k, 
+                top_p = 0.95, 
+                g_seed = seed, 
+                more_smooth = more_smooth
+            )
+            for i in range(images_per_iter):
+                img = result[i].clone()
+                img = img.permute(1, 2, 0).mul_(255).cpu().numpy()
+                img = PImage.fromarray(img.astype(np.uint8))
+                img.save(os.path.join(save_path, f"iters{step}_img{i}.png"))
 
-chw = torchvision.utils.make_grid(recon_B3HW, nrow=8, padding=0, pad_value=1.0)
-chw = chw.permute(1, 2, 0).mul_(255).cpu().numpy()
-chw = PImage.fromarray(chw.astype(np.uint8))
-chw.show()
+print(f"Image generation complete >> Generating npz")
+npz_path = create_npz_from_sample_folder(save_path)
+print(f"Image generation complete >> Generate npz -->  {npz_path}")
