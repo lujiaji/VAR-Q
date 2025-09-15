@@ -1,5 +1,11 @@
 import torch
 from typing import Optional, Tuple, Dict
+try:
+    from VAR_Q.pack_unpack import pack_last_dim_to_int32_triton, unpack_last_dim_from_int32_triton
+    _HAS_TRITON = True
+except Exception:
+    from VAR_Q.pack_unpack import pack_last_dim_to_int32_python, unpack_last_dim_from_int32_python
+    _HAS_TRITON = False
 
 """
 For autoregressive (AR) models, image generation is performed across multiple scales.  
@@ -50,7 +56,7 @@ class VAR_Q:
         qkv_format: str = 'BLHc',  # (B,L,H,c) or (B,H,L,c)
         quant_method: str = 'G_SCALE_HEAD_DIM',  # ['G_TENSOR','G_SCALE_HEAD_DIM','G_HEAD_DIM','G_SCALE','G_TOKEN','G_TOKEN_HEAD']
         blk_idx: int = 0,
-        pack_to_int32: bool = False,
+        pack_to_int32: bool = True,
         eps: float = 1e-12,
         debug: bool = False
     ):
@@ -116,63 +122,19 @@ class VAR_Q:
 
     def _dequantize_from_int8(self, q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         return (q.to(torch.float32) * scale).to(torch.float32)
-
-    # ---------- signed<->unsigned width representation (for bit-pack) ----------
-    @staticmethod
-    def _signed_to_unsigned_width(x_int8: torch.Tensor, bits: int) -> torch.Tensor:
-        mask = (1 << bits) - 1
-        return x_int8.to(torch.int32) & mask
-
-    @staticmethod
-    def _unsigned_to_signed_width(u: torch.Tensor, bits: int) -> torch.Tensor:
-        mask = (1 << bits) - 1
-        sign = 1 << (bits - 1)
-        u = u.to(torch.int32) & mask
-        x = torch.where((u & sign) != 0, u - (1 << bits), u)
-        return x.to(torch.int8)
-
-    # ---------- Pack the last dimension (c) to int32 ----------
+    
+    # ---------- Pack/unpack last dimension to/from int32 ----------
     def _pack_last_dim_to_int32(self, q_int8: torch.Tensor, bits: int) -> Tuple[torch.Tensor, Dict[str,int]]:
-        assert bits in (2,4,8), "bit-pack only implements 2/4/8 bits"
-        vals = 32 // bits
-        *lead, C = q_int8.shape
-        pad_len = (-C) % vals
-        if pad_len:
-            pad = torch.zeros((*lead, pad_len), dtype=q_int8.dtype, device=q_int8.device)
-            q_int8 = torch.cat([q_int8, pad], dim=-1)
-            C_padded = C + pad_len
+        if _HAS_TRITON:
+            return pack_last_dim_to_int32_triton(q_int8, bits)
         else:
-            C_padded = C
-
-        new_last = C_padded // vals
-        q_u = self._signed_to_unsigned_width(q_int8, bits)  # -> int32 non-negative
-        q_u = q_u.view(*lead, new_last, vals).to(torch.int32)
-
-        shifts = (torch.arange(vals, device=q_int8.device, dtype=torch.int32) * bits).view(
-            *([1] * (q_u.dim() - 1)), vals
-        )
-        packed = (q_u << shifts).sum(dim=-1).to(torch.int32)  # [..., new_last]
-
-        meta = {'orig_c': C, 'vals_per_word': vals, 'pad_len': pad_len, 'bits': bits}
-        return packed, meta
+            return pack_last_dim_to_int32_python(q_int8, bits)
 
     def _unpack_last_dim_from_int32(self, packed: torch.Tensor, meta: Dict[str,int]) -> torch.Tensor:
-        bits = meta['bits']
-        vals = meta['vals_per_word']
-        pad_len = meta['pad_len']
-        orig_c = meta['orig_c']
-        mask = (1 << bits) - 1
-
-        shifts = torch.arange(vals, device=packed.device, dtype=torch.int32) * bits
-        pieces_u = [(packed >> s) & mask for s in shifts]
-        u_stack = torch.stack(pieces_u, dim=-1)  # [..., vals]
-
-        unpacked_u = u_stack.reshape(*packed.shape[:-1], packed.shape[-1] * vals)  # [..., C_padded]
-        if pad_len:
-            unpacked_u = unpacked_u[..., :orig_c]
-
-        q_int8 = self._unsigned_to_signed_width(unpacked_u, bits)
-        return q_int8
+        if _HAS_TRITON:
+            return unpack_last_dim_from_int32_triton(packed, meta)
+        else:
+            return unpack_last_dim_from_int32_python(packed, meta)
 
     # ---------- Main quantization process ----------
     def quant(self, item: torch.Tensor):
@@ -266,3 +228,48 @@ class VAR_Q:
         self.quant(item)
         self.cache()
         return self.dequant_all()
+
+if __name__ == "__main__":
+    import time, torch
+    from pack_unpack import (
+        pack_last_dim_to_int32_triton, unpack_last_dim_from_int32_triton,
+        pack_last_dim_to_int32_python, unpack_last_dim_from_int32_python
+    )
+
+    def bench_one(bits, runs=50, warmup=10):
+        B,L,H,c = 100,680,20,64
+        x = torch.randint(-(1<<(bits-1)), (1<<(bits-1)), (B,L,H,c),
+                        dtype=torch.int8, device='cuda')
+
+        # --- Triton: recompile & warmup---
+        for _ in range(warmup):
+            p, meta = pack_last_dim_to_int32_triton(x, bits)
+            xr = unpack_last_dim_from_int32_triton(p, meta)
+        torch.cuda.synchronize()
+
+        t0 = time.time()
+        for _ in range(runs):
+            p, meta = pack_last_dim_to_int32_triton(x, bits)
+            xr = unpack_last_dim_from_int32_triton(p, meta)
+        torch.cuda.synchronize()
+        t1 = time.time()
+        triton_ms = (t1 - t0) * 1000 / runs
+
+        # --- PyTorch fallback---
+        for _ in range(warmup):
+            p, meta = pack_last_dim_to_int32_python(x, bits)
+            xr = unpack_last_dim_from_int32_python(p, meta)
+        torch.cuda.synchronize()
+
+        t0 = time.time()
+        for _ in range(runs):
+            p, meta = pack_last_dim_to_int32_python(x, bits)
+            xr = unpack_last_dim_from_int32_python(p, meta)
+        torch.cuda.synchronize()
+        t1 = time.time()
+        torch_ms = (t1 - t0) * 1000 / runs
+
+        print(f"{bits}bit  Triton: {triton_ms:.3f} ms/iter   PyTorch: {torch_ms:.3f} ms/iter")
+
+    for b in (2,4,8):
+        bench_one(b)
