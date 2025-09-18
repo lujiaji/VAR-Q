@@ -6,10 +6,10 @@ import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin
 
-import dist
-from models.basic_var import AdaLNBeforeHead, AdaLNSelfAttn
-from models.helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_
-from models.vqvae import VQVAE, VectorQuantizer2
+from .. import dist
+from .basic_var import AdaLNBeforeHead, AdaLNSelfAttn
+from .helpers import gumbel_softmax_with_rng, sample_with_top_k_top_p_
+from .vqvae import VQVAE, VectorQuantizer2
 
 
 class SharedAdaLin(nn.Linear):
@@ -26,6 +26,7 @@ class VAR(nn.Module):
         attn_l2_norm=False,
         patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),   # 10 steps by default
         flash_if_available=True, fused_if_available=True,
+        q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc',enable_quantization=False,
     ):
         super().__init__()
         # 0. hyperparameters
@@ -89,6 +90,8 @@ class VAR(nn.Module):
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[block_idx], last_drop_p=0 if block_idx == 0 else dpr[block_idx-1],
                 attn_l2_norm=attn_l2_norm,
                 flash_if_available=flash_if_available, fused_if_available=fused_if_available,
+                q_bits=q_bits, quant_method=quant_method, qkv_format=qkv_format,
+                enable_quantization=enable_quantization,
             )
             for block_idx in range(depth)
         ])

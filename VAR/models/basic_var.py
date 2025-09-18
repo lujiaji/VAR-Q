@@ -4,8 +4,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.helpers import DropPath, drop_path
+from .helpers import DropPath, drop_path
 
+# Import VAR_Q from the correct path (optional)
+VAR_Q = None
+try:
+    import sys
+    import os
+    # Add VAR-Q directory to path
+    var_q_path = os.path.join(os.path.dirname(__file__), '..', '..')
+    if var_q_path not in sys.path:
+        sys.path.append(var_q_path)
+    from VAR_Q.quant import VAR_Q
+except ImportError:
+    print("VAR_Q not available - quantization disabled")
+    VAR_Q = None
 
 # this file only provides the 3 blocks used in VAR transformer
 __all__ = ['FFN', 'AdaLNSelfAttn', 'AdaLNBeforeHead']
@@ -28,7 +41,6 @@ except ImportError:
         attn = query.mul(scale) @ key.transpose(-2, -1) # BHLc @ BHcL => BHLL
         if attn_mask is not None: attn.add_(attn_mask)
         return (F.dropout(attn.softmax(dim=-1), p=dropout_p, inplace=True) if dropout_p > 0 else attn.softmax(dim=-1)) @ value
-
 
 class FFN(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0., fused_if_available=True):
@@ -59,11 +71,16 @@ class SelfAttention(nn.Module):
     def __init__(
         self, block_idx, embed_dim=768, num_heads=12,
         attn_drop=0., proj_drop=0., attn_l2_norm=False, flash_if_available=True,
+        q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=False,
     ):
         super().__init__()
         assert embed_dim % num_heads == 0
         self.block_idx, self.num_heads, self.head_dim = block_idx, num_heads, embed_dim // num_heads  # =64
         self.attn_l2_norm = attn_l2_norm
+        self.q_bits = q_bits
+        self.quant_method = quant_method
+        self.qkv_format = qkv_format
+        self.enable_quantization = enable_quantization
         if self.attn_l2_norm:
             self.scale = 1
             self.scale_mul_1H11 = nn.Parameter(torch.full(size=(1, self.num_heads, 1, 1), fill_value=4.0).log(), requires_grad=True)
@@ -84,7 +101,20 @@ class SelfAttention(nn.Module):
         # only used during inference
         self.caching, self.cached_k, self.cached_v = False, None, None
     
-    def kv_caching(self, enable: bool): self.caching, self.cached_k, self.cached_v = enable, None, None
+    def kv_caching(self, enable: bool): 
+        if enable:
+            self.caching, self.cached_k, self.cached_v = True, None, None
+            #### Init VAR-Q for K and V (only if quantization is enabled) ####
+            if self.enable_quantization:
+                self.k_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method, blk_idx=self.block_idx)
+                self.v_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method, blk_idx=self.block_idx)
+            else:
+                self.k_quant = None
+                self.v_quant = None
+        else:
+            self.caching, self.cached_k, self.cached_v = False, None, None
+            if hasattr(self, 'k_quant') and self.k_quant is not None:
+                del self.k_quant, self.v_quant
     
     # NOTE: attn_bias is None during inference because kv cache is enabled
     def forward(self, x, attn_bias):
@@ -95,8 +125,14 @@ class SelfAttention(nn.Module):
         # qkv: BL3Hc
         
         using_flash = self.using_flash and attn_bias is None and qkv.dtype != torch.float32
-        if using_flash or self.using_xform: q, k, v = qkv.unbind(dim=2); dim_cat = 1   # q or k or v: BLHc
-        else: q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0); dim_cat = 2               # q or k or v: BHLc
+        if using_flash or self.using_xform: 
+            q, k, v = qkv.unbind(dim=2)
+            dim_cat = 1
+            self.qkv_format = 'BLHc'   # q or k or v: BLHc
+        else: 
+            q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0)
+            dim_cat = 2
+            self.qkv_format = 'BHLc'          # q or k or v: BHLc
         
         if self.attn_l2_norm:
             scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
@@ -105,8 +141,17 @@ class SelfAttention(nn.Module):
             k = F.normalize(k, dim=-1)
         
         if self.caching:
-            if self.cached_k is None: self.cached_k = k; self.cached_v = v
-            else: k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat); v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
+            ########## Implement VAR-Q here ##########
+            if self.enable_quantization:
+                k = self.k_quant.use_var_q(k)
+                v = self.v_quant.use_var_q(v)
+            else:
+                if self.cached_k is None: 
+                    self.cached_k = k
+                    self.cached_v = v
+                else: 
+                    k = self.cached_k = torch.cat((self.cached_k, k), dim=dim_cat)
+                    v = self.cached_v = torch.cat((self.cached_v, v), dim=dim_cat)
         
         dropout_p = self.attn_drop if self.training else 0.0
         if using_flash:
@@ -130,12 +175,16 @@ class AdaLNSelfAttn(nn.Module):
         self, block_idx, last_drop_p, embed_dim, cond_dim, shared_aln: bool, norm_layer,
         num_heads, mlp_ratio=4., drop=0., attn_drop=0., drop_path=0., attn_l2_norm=False,
         flash_if_available=False, fused_if_available=True,
+        q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=True,
     ):
         super(AdaLNSelfAttn, self).__init__()
         self.block_idx, self.last_drop_p, self.C = block_idx, last_drop_p, embed_dim
         self.C, self.D = embed_dim, cond_dim
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.attn = SelfAttention(block_idx=block_idx, embed_dim=embed_dim, num_heads=num_heads, attn_drop=attn_drop, proj_drop=drop, attn_l2_norm=attn_l2_norm, flash_if_available=flash_if_available)
+        self.attn = SelfAttention(block_idx=block_idx, embed_dim=embed_dim, num_heads=num_heads, 
+                                attn_drop=attn_drop, proj_drop=drop, attn_l2_norm=attn_l2_norm, 
+                                flash_if_available=flash_if_available, q_bits=q_bits, quant_method=quant_method, 
+                                qkv_format=qkv_format, enable_quantization=enable_quantization)
         self.ffn = FFN(in_features=embed_dim, hidden_features=round(embed_dim * mlp_ratio), drop=drop, fused_if_available=fused_if_available)
         
         self.ln_wo_grad = norm_layer(embed_dim, elementwise_affine=False)
