@@ -20,6 +20,13 @@ from flash_attn import flash_attn_varlen_kvpacked_func  # qkv: N3Hc, ret: NHc
 
 from torch.nn.functional import scaled_dot_product_attention as slow_attn    # q, k, v: BHLc
 
+# Import VAR-Q quantization
+try:
+    from VAR_Q.quant import VAR_Q
+except ImportError:
+    print("Warning: VAR_Q not found, quantization will be disabled")
+    VAR_Q = None
+
 # Import flash_attn's fused ops
 try:
     from flash_attn.ops.layer_norm import dropout_add_layer_norm
@@ -197,6 +204,7 @@ class SelfAttention(nn.Module):
         self, embed_dim=768, num_heads=12,
         proj_drop=0., tau=1, cos_attn=False, customized_flash_attn=True, use_flex_attn=False, 
         batch_size=2, pad_to_multiplier=1, rope2d_normalized_by_hw=0,
+        q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=False,
     ):
         """
         :param embed_dim: model's width
@@ -235,14 +243,33 @@ class SelfAttention(nn.Module):
         self.batch_size = batch_size
         self.use_flex_attn = use_flex_attn
         self.pad_to_multiplier = pad_to_multiplier
-
+        self.q_bits = q_bits
+        self.quant_method = quant_method
+        self.qkv_format = qkv_format
+        self.enable_quantization = enable_quantization
         self.rope2d_normalized_by_hw = rope2d_normalized_by_hw
+        self.block_idx = 0  # Will be set by the parent block
 
     
     def kv_caching(self, enable: bool): # kv caching: only used during inference
-        self.caching = enable
-        self.cached_k = None
-        self.cached_v = None
+        if enable:
+            self.caching = True
+            self.cached_k = None
+            self.cached_v = None
+            #### Init VAR-Q for K and V (only if quantization is enabled) ####
+            if self.enable_quantization and VAR_Q is not None:
+                self.k_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method, blk_idx=self.block_idx)
+                self.v_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method, blk_idx=self.block_idx)
+            else:
+                self.k_quant = None
+                self.v_quant = None
+        else:
+            self.caching = False
+            self.cached_k = None
+            self.cached_v = None
+            if hasattr(self, 'k_quant') and self.k_quant is not None:
+                del self.k_quant, self.v_quant
+
     
     # NOTE: attn_bias_or_two_vector is None during inference
     def forward(self, x, attn_bias_or_two_vector: Union[torch.Tensor, Tuple[torch.IntTensor, torch.IntTensor]], attn_fn=None, scale_schedule=None, rope2d_freqs_grid=None, scale_ind=0):
@@ -275,8 +302,16 @@ class SelfAttention(nn.Module):
         
         # qkv: amp, bf16
         qkv = F.linear(input=x, weight=self.mat_qkv.weight, bias=torch.cat((self.q_bias, self.zero_k_bias, self.v_bias))).view(B, L, 3, self.num_heads, self.head_dim)  # BL3Hc
-        if self.using_flash: q, k, v = qkv.unbind(dim=2); L_dim = 1           # q or k or v: all are shaped in (B:batch_size, L:seq_len, H:heads, c:head_dim)
-        else: q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0); L_dim = 2   # q or k or v: all are shaped in (B:batch_size, H:heads, L:seq_len, c:head_dim)
+        if self.using_flash: 
+            q, k, v = qkv.unbind(dim=2)
+            L_dim = 1           # q or k or v: all are shaped in (B:batch_size, L:seq_len, H:heads, c:head_dim)
+            if self.k_quant is not None and self.v_quant is not None:
+                self.k_quant.qkv_format = self.v_quant.qkv_format = 'BLHc'   # q or k or v: BLHc
+        else: 
+            q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0)
+            L_dim = 2   # q or k or v: all are shaped in (B:batch_size, H:heads, L:seq_len, c:head_dim)
+            if self.k_quant is not None and self.v_quant is not None:
+                self.k_quant.qkv_format = self.v_quant.qkv_format = 'BHLc'   # q or k or v: BHLc
         
         if self.cos_attn:   # always True
             scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp() # 11H1 (flash), or 1H11 (not flash)
@@ -290,8 +325,16 @@ class SelfAttention(nn.Module):
         if rope2d_freqs_grid is not None:
             q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind) #, freqs_cis=freqs_cis)
         if self.caching:    # kv caching: only used during inference
-            if self.cached_k is None: self.cached_k = k; self.cached_v = v
-            else: k = self.cached_k = torch.cat((self.cached_k, k), dim=L_dim); v = self.cached_v = torch.cat((self.cached_v, v), dim=L_dim)
+            if self.enable_quantization and self.k_quant is not None and self.v_quant is not None:
+                k = self.k_quant.use_var_q(k).contiguous()
+                v = self.v_quant.use_var_q(v).contiguous()
+            else:
+                if self.cached_k is None: 
+                    self.cached_k = k
+                    self.cached_v = v
+                else: 
+                    k = self.cached_k = torch.cat((self.cached_k, k), dim=L_dim)
+                    v = self.cached_v = torch.cat((self.cached_v, v), dim=L_dim)
         
         if self.using_flash:
             if attn_bias_or_two_vector is not None: # training
@@ -409,13 +452,15 @@ class SelfAttnBlock(nn.Module):
         self, embed_dim, kv_dim, cross_attn_layer_scale, cond_dim, act: bool, shared_aln: bool, norm_layer: partial,
         num_heads, mlp_ratio=4., drop=0., drop_path=0., tau=1, cos_attn=False,
         swiglu=False, customized_flash_attn=False, fused_mlp=False, fused_norm_func=None, checkpointing_sa_only=False,
+        q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=False,
     ):
         super(SelfAttnBlock, self).__init__()
         self.C, self.D = embed_dim, cond_dim
         self.drop_path_rate = drop_path
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.attn = SelfAttention(
-            embed_dim=embed_dim, num_heads=num_heads, proj_drop=drop, tau=tau, cos_attn=cos_attn, customized_flash_attn=customized_flash_attn, attn_fn = attn_fn
+            embed_dim=embed_dim, num_heads=num_heads, proj_drop=drop, tau=tau, cos_attn=cos_attn, customized_flash_attn=customized_flash_attn,
+            q_bits=q_bits, quant_method=quant_method, qkv_format=qkv_format, enable_quantization=enable_quantization,
         )
         self.using_swiglu = swiglu
         self.ffn = (FFNSwiGLU if swiglu else FFN)(in_features=embed_dim, hidden_features=round(embed_dim * mlp_ratio / 256) * 256, drop=drop, fused_mlp=fused_mlp)
@@ -458,6 +503,7 @@ class CrossAttnBlock(nn.Module):
         num_heads, mlp_ratio=4., drop=0., drop_path=0., tau=1, cos_attn=False,
         swiglu=False, customized_flash_attn=False, fused_mlp=False, fused_norm_func=None, checkpointing_sa_only=False,
         use_flex_attn=False, batch_size=2, pad_to_multiplier=1, apply_rope2d=False, rope2d_normalized_by_hw=False,
+        q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=False,
     ):
         super(CrossAttnBlock, self).__init__()
         self.C, self.D = embed_dim, cond_dim
@@ -466,8 +512,9 @@ class CrossAttnBlock(nn.Module):
         self.sa = SelfAttention(
             embed_dim=embed_dim, num_heads=num_heads, proj_drop=drop, tau=tau, cos_attn=cos_attn, customized_flash_attn=customized_flash_attn,
             use_flex_attn=use_flex_attn, batch_size=batch_size, pad_to_multiplier=pad_to_multiplier, rope2d_normalized_by_hw=rope2d_normalized_by_hw,
+            q_bits=q_bits, quant_method=quant_method, qkv_format=qkv_format, enable_quantization=enable_quantization,
         )
-        self.ca = CrossAttention(embed_dim=embed_dim, kv_dim=kv_dim, num_heads=num_heads, proj_drop=drop, cos_attn=cos_attn)
+        self.ca = CrossAttention(embed_dim=embed_dim, kv_dim=kv_dim, num_heads=num_heads, proj_drop=drop, cos_attn=cos_attn,)
         self.using_swiglu = swiglu
         self.ffn = (FFNSwiGLU if swiglu else FFN)(in_features=embed_dim, hidden_features=round(embed_dim * mlp_ratio / 256) * 256, drop=drop, fused_mlp=fused_mlp)
         

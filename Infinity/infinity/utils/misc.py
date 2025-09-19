@@ -16,7 +16,7 @@ import torch
 import torch.distributed as tdist
 import torch.nn.functional as F
 
-import infinity.utils.dist as dist
+from .dist import get_world_size, get_rank, allreduce
 
 os_system = functools.partial(subprocess.call, shell=True)
 def echo(info):
@@ -385,13 +385,13 @@ if __name__ == '__main__':
 
 def check_randomness(args):
     U = 16384
-    t = torch.zeros(dist.get_world_size(), 4, dtype=torch.float32, device=args.device)
+    t = torch.zeros(get_world_size(), 4, dtype=torch.float32, device=args.device)
     t0 = torch.zeros(1, dtype=torch.float32, device=args.device).random_(U)
-    t[dist.get_rank(), 0] = float(random.randrange(U))
-    t[dist.get_rank(), 1] = float(np.random.randint(U))
-    t[dist.get_rank(), 2] = float(torch.randint(0, U, (1,))[0])
-    t[dist.get_rank(), 3] = float(t0[0])
-    dist.allreduce(t)
-    for rk in range(1, dist.get_world_size()):
+    t[get_rank(), 0] = float(random.randrange(U))
+    t[get_rank(), 1] = float(np.random.randint(U))
+    t[get_rank(), 2] = float(torch.randint(0, U, (1,))[0])
+    t[get_rank(), 3] = float(t0[0])
+    allreduce(t)
+    for rk in range(1, get_world_size()):
         assert torch.allclose(t[rk - 1], t[rk]), f't={t}'
     del t0, t, U

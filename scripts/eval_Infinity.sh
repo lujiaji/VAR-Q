@@ -69,6 +69,7 @@ test_gen_eval() {
     --cfg_insertion_layer ${cfg_insertion_layer} \
     --outdir ${out_dir}/images \
     --rewrite_prompt ${rewrite_prompt} \
+    --metadata_file VAR-Q/Benchmark/GenEval/prompts/evaluation_metadata.jsonl \
 
     # detect objects
     ${python_ext} GenEval/evaluate_images.py ${out_dir}/images \
