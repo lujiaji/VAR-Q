@@ -207,7 +207,7 @@ class Args(Tap):
             if self.dbg_ks_last is None:
                 self.dbg_ks_last = deque(maxlen=6)
             
-            from utils.misc import time_str
+            from .misc import time_str
             self.dbg_ks_fp.seek(0)
             f_back = sys._getframe().f_back
             file_desc = f'{f_back.f_code.co_filename:24s}'[-24:]

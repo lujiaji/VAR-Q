@@ -20,11 +20,28 @@ from PIL import Image, ImageEnhance
 import torch.nn.functional as F
 from torch.cuda.amp import autocast
 
-from infinity.models.infinity import Infinity
-from infinity.models.basic import *
+# Lazy import to avoid import errors when only using utility functions
+def _import_infinity():
+    print(os.getcwd())
+    from ..infinity.models.infinity import Infinity
+    return Infinity
+
+def _import_basic():
+    import infinity.models.basic as basic
+    return basic
+
+# Only import when actually needed
+Infinity = None
 import PIL.Image as PImage
 from torchvision.transforms.functional import to_tensor
-from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
+# Lazy import for dynamic_resolution
+def _import_dynamic_resolution():
+    from ..infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
+    return dynamic_resolution_h_w, h_div_w_templates
+
+# Global variables for lazy loading
+dynamic_resolution_h_w = None
+h_div_w_templates = None
 
 
 def extract_key_val(text):
@@ -173,9 +190,20 @@ def load_infinity(
     use_flex_attn=False,
     bf16=False,
     checkpoint_type='torch',
+    # VAR-Q quantization parameters
+    enable_quantization=True,
+    q_bits=8,
+    quant_method='G_SCALE_HEAD_DIM',
+    qkv_format='BHLc',
 ):
     print(f'[Loading Infinity]')
     text_maxlen = 512
+    
+    # Import Infinity when needed
+    global Infinity
+    if Infinity is None:
+        Infinity = _import_infinity()
+    
     with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16, cache_enabled=True), torch.no_grad():
         infinity_test: Infinity = Infinity(
             vae_local=vae, text_channels=text_channels, text_maxlen=text_maxlen,
@@ -193,6 +221,11 @@ def load_infinity(
             apply_spatial_patchify=apply_spatial_patchify,
             inference_mode=True,
             train_h_div_w_list=[1.0],
+            # VAR-Q quantization parameters
+            enable_quantization=enable_quantization,
+            q_bits=q_bits,
+            quant_method=quant_method,
+            qkv_format=qkv_format,
             **model_kwargs,
         ).to(device=device)
         print(f'[you selected Infinity with {model_kwargs=}] model size: {sum(p.numel() for p in infinity_test.parameters())/1e9:.2f}B, bf16={bf16}')
@@ -258,7 +291,7 @@ def load_visual_tokenizer(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # load vae
     if args.vae_type in [14,16,18,20,24,32,64]:
-        from infinity.models.bsq_vae.vae import vae_model
+        from ..infinity.models.bsq_vae.vae import vae_model
         schedule_mode = "dynamic"
         codebook_dim = args.vae_type
         codebook_size = 2**codebook_dim
@@ -345,6 +378,11 @@ def load_transformer(vae, args):
         use_flex_attn=args.use_flex_attn,
         bf16=args.bf16,
         checkpoint_type=args.checkpoint_type,
+        # VAR-Q quantization parameters
+        enable_quantization=bool(args.enable_quantization),
+        q_bits=args.q_bits,
+        quant_method=args.quant_method,
+        qkv_format=args.qkv_format,
     )
     return infinity
 
@@ -375,14 +413,89 @@ def add_common_arguments(parser):
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--bf16', type=int, default=1, choices=[0,1])
     
+    # VAR-Q quantization arguments
+    parser.add_argument('--enable_quantization', type=int, default=0, choices=[0,1], 
+                        help='Enable VAR-Q quantization (0: disabled, 1: enabled)')
+    parser.add_argument('--q_bits', type=int, default=8, choices=[4,8,16],
+                        help='Quantization bits for VAR-Q (4, 8, or 16 bits)')
+    parser.add_argument('--quant_method', type=str, default='G_SCALE_HEAD_DIM', 
+                        choices=['G_SCALE_HEAD_DIM', 'G_SCALE_PER_HEAD', 'PER_DIM'],
+                        help='VAR-Q quantization method')
+    parser.add_argument('--qkv_format', type=str, default='BLHc', choices=['BLHc', 'BHLc'],
+                        help='QKV tensor format for VAR-Q')
+    
+    # Configuration file support
+    parser.add_argument('--config_file', type=str, default=None,
+                        help='Path to JSON configuration file (overrides individual args)')
+    
 
+
+# Module-level variables for dynamic_resolution
+dynamic_resolution_h_w = None
+h_div_w_templates = None
 
 if __name__ == '__main__':
+    
     parser = argparse.ArgumentParser()
     add_common_arguments(parser)
     parser.add_argument('--prompt', type=str, default='a dog')
     parser.add_argument('--save_file', type=str, default='./tmp.jpg')
     args = parser.parse_args()
+
+    # Load configuration file if provided
+    if args.config_file:
+        try:
+            import sys
+            import os
+            # Add VAR_Q to path
+            var_q_path = os.path.join(os.path.dirname(__file__), '..', '..', 'VAR_Q')
+            if os.path.exists(var_q_path):
+                sys.path.append(var_q_path)
+                from config_loader import VARQConfig
+                
+                config = VARQConfig(args.config_file)
+                print(f"[Config] Loading configuration from {args.config_file}")
+                
+                # Override args with config values
+                model_config = config.get_model_config()
+                quant_config = config.get_quantization_config()
+                inference_config = config.get_inference_config()
+                checkpoint_config = config.get_checkpoint_config()
+                
+                # Update model parameters
+                if 'model_type' in model_config:
+                    args.model_type = model_config['model_type']
+                
+                # Update quantization parameters
+                args.enable_quantization = int(quant_config.get('enable', False))
+                args.q_bits = quant_config.get('q_bits', 8)
+                args.quant_method = quant_config.get('quant_method', 'G_SCALE_HEAD_DIM')
+                args.qkv_format = quant_config.get('qkv_format', 'BLHc')
+                
+                # Update inference parameters
+                if 'cfg' in inference_config:
+                    args.cfg = str(inference_config['cfg'])
+                if 'tau' in inference_config:
+                    args.tau = inference_config['tau']
+                if 'seed' in inference_config:
+                    args.seed = inference_config['seed']
+                
+                # Update checkpoint paths
+                if 'vae_ckpt' in checkpoint_config:
+                    args.vae_path = checkpoint_config['vae_ckpt']
+                if 'model_path' in checkpoint_config:
+                    args.model_path = checkpoint_config['model_path']
+                
+                print(f"[Config] Quantization: {'enabled' if args.enable_quantization else 'disabled'}")
+                if args.enable_quantization:
+                    print(f"[Config]   - q_bits: {args.q_bits}")
+                    print(f"[Config]   - quant_method: {args.quant_method}")
+                    print(f"[Config]   - qkv_format: {args.qkv_format}")
+                    
+        except ImportError:
+            print(f"[Warning] Could not load config file {args.config_file}: VAR_Q config_loader not found")
+        except Exception as e:
+            print(f"[Warning] Error loading config file {args.config_file}: {e}")
 
     # parse cfg
     args.cfg = list(map(float, args.cfg.split(',')))
@@ -395,6 +508,10 @@ if __name__ == '__main__':
     vae = load_visual_tokenizer(args)
     # load infinity
     infinity = load_transformer(vae, args)
+    
+    # Import dynamic_resolution when needed
+    if dynamic_resolution_h_w is None:
+        dynamic_resolution_h_w, h_div_w_templates = _import_dynamic_resolution()
     
     scale_schedule = dynamic_resolution_h_w[args.h_div_w_template][args.pn]['scales']
     scale_schedule = [ (1, h, w) for (_, h, w) in scale_schedule]

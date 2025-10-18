@@ -1,7 +1,7 @@
 import argparse
 import torch
 
-from infinity.models.bsq_vae.flux_vqgan import AutoEncoder
+from .flux_vqgan import AutoEncoder
 
 def load_cnn(model, state_dict, prefix, expand=False, use_linear=False):
     delete_keys = []

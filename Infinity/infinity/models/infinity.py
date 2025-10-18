@@ -17,15 +17,15 @@ from torch.utils.checkpoint import checkpoint
 from PIL import Image
 import numpy as np
 
-import infinity.utils.dist as dist
-from infinity.utils.dist import for_visualize
-from infinity.models.basic import flash_attn_func, flash_fused_op_installed, AdaLNBeforeHead, CrossAttnBlock, SelfAttnBlock, CrossAttention, FastRMSNorm, precompute_rope2d_freqs_grid
-from infinity.utils import misc
-from infinity.models.flex_attn import FlexAttn
-from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
+from ..utils import dist
+from ..utils.dist import for_visualize
+from ..models.basic import flash_attn_func, flash_fused_op_installed, AdaLNBeforeHead, CrossAttnBlock, SelfAttnBlock, CrossAttention, FastRMSNorm, precompute_rope2d_freqs_grid
+from ..utils import misc
+from ..models.flex_attn import FlexAttn
+from ..utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
 
 try:
-    from infinity.models.fused_op import fused_ada_layer_norm, fused_ada_rms_norm
+    from .fused_op import fused_ada_layer_norm, fused_ada_rms_norm
 except:
     fused_ada_layer_norm, fused_ada_rms_norm = None, None
 
@@ -102,6 +102,7 @@ class Infinity(nn.Module):
         always_training_scales=20,
         apply_spatial_patchify = 0,
         inference_mode=False,
+        q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=True,
     ):
         # set hyperparameters
         self.C = embed_dim
@@ -127,7 +128,12 @@ class Infinity(nn.Module):
         self.train_h_div_w_list = train_h_div_w_list if train_h_div_w_list else h_div_w_templates
         self.video_frames = video_frames
         self.always_training_scales = always_training_scales
-
+        ############ VAR-Q params ############
+        self.q_bits = q_bits
+        self.quant_method = quant_method
+        self.qkv_format = qkv_format
+        self.enable_quantization = enable_quantization
+        ############ VAR-Q params ############
         assert add_lvl_embeding_only_first_block in [0,1]
         self.add_lvl_embeding_only_first_block = add_lvl_embeding_only_first_block
         assert rope2d_each_sa_layer in [0,1]
@@ -260,7 +266,13 @@ class Infinity(nn.Module):
                 swiglu=swiglu, customized_flash_attn=self.customized_flash_attn, fused_mlp=fused_mlp, fused_norm_func=fused_norm_func,
                 checkpointing_sa_only=self.checkpointing == 'self-attn',
                 use_flex_attn=use_flex_attn, batch_size=batch_size, pad_to_multiplier=pad_to_multiplier, rope2d_normalized_by_hw=rope2d_normalized_by_hw,
+                q_bits=self.q_bits, quant_method=self.quant_method, qkv_format=self.qkv_format, enable_quantization=self.enable_quantization,
             )
+            # Set block_idx for attention modules
+            if hasattr(block, 'sa'):  # CrossAttnBlock
+                block.sa.block_idx = block_idx
+            elif hasattr(block, 'attn'):  # SelfAttnBlock
+                block.attn.block_idx = block_idx
             self.unregistered_blocks.append(block)
         
         # [head]

@@ -1,0 +1,28 @@
+{
+  "model": {
+    "model_type": "infinity_2b"
+  },
+  "quantization": {
+    "enable": true,
+    "q_bits": 8,
+    "quant_method": "G_SCALE_HEAD_DIM",
+    "qkv_format": "BHLc"
+  },
+  "inference": {
+    "device": "cuda",
+    "seed": 0,
+    "cfg": 3.0,
+    "tau": 0.5,
+    "h_div_w": 1,
+    "enable_positivee_prompt": 0
+  },
+  "batch_processing": {
+    "total_iters": 1000,
+    "batch_size": 50
+  },
+  "checkpoints": {
+    "vae_ckpt": "YOUR_PATH/infinity_vae_d32reg.pth",
+    "model_path": "YOUR_PATH/infinity_2b_reg.pth",
+    "model_url": "https://weights.replicate.delivery/default/FoundationVision/Infinity/model_cache.tar"
+  }
+}
