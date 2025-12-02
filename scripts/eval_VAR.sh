@@ -9,6 +9,6 @@ python inference_VAR.py \
     --batch_size 50 \
     --save_path '../Benchmark/output/VAR/eval/images'
 
-python /home/jiaji_lu/AR/AR/VAR_Q/evaluator.py \
+python evaluator_VAR.py \
     YOUR_PATH/VIRTUAL_imagenet256_labeled.npz \
     YOUR_PATH/YOUR_VAR_INFER_NPZ.npz \
