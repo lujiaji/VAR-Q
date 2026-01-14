@@ -9,6 +9,6 @@ python inference_VAR.py \
     --batch_size 50 \
     --save_path '../Benchmark/output/VAR/eval/images'
 
-python evaluator_VAR.py \
+python ../Benchmark/OpenAI-tool/evaluator.py \
     YOUR_PATH/VIRTUAL_imagenet256_labeled.npz \
-    YOUR_PATH/YOUR_VAR_INFER_NPZ.npz \
+    ../Benchmark/output/VAR/eval/imagesYOUR_VAR_INFER_NPZ.npz \

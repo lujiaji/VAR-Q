@@ -43,7 +43,7 @@ In VAR-Q, we define different grouping strategies for quantization:
   For VAR, this results in 680 or 2240 groups (depending on configuration).  
 
 - **G_TOKEN_HEAD**: group tensors by both token and head dimensions.  
-  This yields `L × H` groups (e.g., `2240 × 20` for VAR), providing the finest granularity among these strategies.  
+  This yields `L × H` groups (e.g., `2240 × 20` for VAR).  
 
 These grouping strategies allow us to explore different quantization granularities for Q/K/V tensors in AR-based image generation models.
 
