@@ -103,6 +103,9 @@ class Infinity(nn.Module):
         apply_spatial_patchify = 0,
         inference_mode=False,
         q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=True,
+        rescale_qk=False,
+        enable_fused_kv_flashattn=False,
+        outlier_ratio=0.0, outlier_mode='ratio', outlier_n_sigma=3.0,
     ):
         # set hyperparameters
         self.C = embed_dim
@@ -133,6 +136,11 @@ class Infinity(nn.Module):
         self.quant_method = quant_method
         self.qkv_format = qkv_format
         self.enable_quantization = enable_quantization
+        self.rescale_qk = rescale_qk
+        self.enable_fused_kv_flashattn = enable_fused_kv_flashattn
+        self.outlier_ratio = outlier_ratio
+        self.outlier_mode = outlier_mode
+        self.outlier_n_sigma = outlier_n_sigma
         ############ VAR-Q params ############
         assert add_lvl_embeding_only_first_block in [0,1]
         self.add_lvl_embeding_only_first_block = add_lvl_embeding_only_first_block
@@ -150,8 +158,12 @@ class Infinity(nn.Module):
         self.pad_to_multiplier = max(1, pad_to_multiplier)
         
         customized_kernel_installed = any('Infinity' in arg_name for arg_name in flash_attn_func.__code__.co_varnames)
-        self.customized_flash_attn = customized_flash_attn and customized_kernel_installed
-        if customized_flash_attn and not customized_kernel_installed:
+        if inference_mode:
+            # Standard flash_attn is sufficient for inference (no custom mask kwargs needed)
+            self.customized_flash_attn = customized_flash_attn
+        else:
+            self.customized_flash_attn = customized_flash_attn and customized_kernel_installed
+        if customized_flash_attn and not customized_kernel_installed and not inference_mode:
             import inspect, warnings
             file_path = inspect.getsourcefile(flash_attn_func)
             line_number = inspect.getsourcelines(flash_attn_func)[1]
@@ -266,7 +278,10 @@ class Infinity(nn.Module):
                 swiglu=swiglu, customized_flash_attn=self.customized_flash_attn, fused_mlp=fused_mlp, fused_norm_func=fused_norm_func,
                 checkpointing_sa_only=self.checkpointing == 'self-attn',
                 use_flex_attn=use_flex_attn, batch_size=batch_size, pad_to_multiplier=pad_to_multiplier, rope2d_normalized_by_hw=rope2d_normalized_by_hw,
-                q_bits=self.q_bits, quant_method=self.quant_method, qkv_format=self.qkv_format, enable_quantization=self.enable_quantization,
+                q_bits=self.q_bits, quant_method=self.quant_method, qkv_format=self.qkv_format,
+                enable_quantization=self.enable_quantization, rescale_qk=self.rescale_qk,
+                enable_fused_kv_flashattn=self.enable_fused_kv_flashattn,
+                outlier_ratio=self.outlier_ratio, outlier_mode=self.outlier_mode, outlier_n_sigma=self.outlier_n_sigma,
             )
             # Set block_idx for attention modules
             if hasattr(block, 'sa'):  # CrossAttnBlock

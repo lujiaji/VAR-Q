@@ -23,8 +23,12 @@ from torch.cuda.amp import autocast
 # Lazy import to avoid import errors when only using utility functions
 def _import_infinity():
     print(os.getcwd())
-    from ..infinity.models.infinity import Infinity
-    return Infinity
+    try:
+        from ..infinity.models.infinity import Infinity
+        return Infinity
+    except Exception:
+        from infinity.models.infinity import Infinity
+        return Infinity
 
 def _import_basic():
     import infinity.models.basic as basic
@@ -36,8 +40,12 @@ import PIL.Image as PImage
 from torchvision.transforms.functional import to_tensor
 # Lazy import for dynamic_resolution
 def _import_dynamic_resolution():
-    from ..infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
-    return dynamic_resolution_h_w, h_div_w_templates
+    try:
+        from ..infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
+        return dynamic_resolution_h_w, h_div_w_templates
+    except Exception:
+        from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
+        return dynamic_resolution_h_w, h_div_w_templates
 
 # Global variables for lazy loading
 dynamic_resolution_h_w = None
@@ -195,6 +203,11 @@ def load_infinity(
     q_bits=8,
     quant_method='G_SCALE_HEAD_DIM',
     qkv_format='BHLc',
+    rescale_qk=False,
+    enable_fused_kv_flashattn=False,
+    outlier_ratio=0.0,
+    outlier_mode='ratio',
+    outlier_n_sigma=3.0,
 ):
     print(f'[Loading Infinity]')
     text_maxlen = 512
@@ -205,11 +218,13 @@ def load_infinity(
         Infinity = _import_infinity()
     
     with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16, cache_enabled=True), torch.no_grad():
+        if enable_fused_kv_flashattn and int(q_bits) != 4:
+            raise ValueError("enable_fused_kv_flashattn requires int4 quantization (q_bits == 4).")
         infinity_test: Infinity = Infinity(
             vae_local=vae, text_channels=text_channels, text_maxlen=text_maxlen,
             shared_aln=True, raw_scale_schedule=scale_schedule,
             checkpointing='full-block',
-            customized_flash_attn=False,
+            customized_flash_attn=True,
             fused_norm=True,
             pad_to_multiplier=128,
             use_flex_attn=use_flex_attn,
@@ -226,6 +241,11 @@ def load_infinity(
             q_bits=q_bits,
             quant_method=quant_method,
             qkv_format=qkv_format,
+            rescale_qk=rescale_qk,
+            enable_fused_kv_flashattn=bool(enable_fused_kv_flashattn),
+            outlier_ratio=outlier_ratio,
+            outlier_mode=outlier_mode,
+            outlier_n_sigma=outlier_n_sigma,
             **model_kwargs,
         ).to(device=device)
         print(f'[you selected Infinity with {model_kwargs=}] model size: {sum(p.numel() for p in infinity_test.parameters())/1e9:.2f}B, bf16={bf16}')
@@ -291,7 +311,10 @@ def load_visual_tokenizer(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # load vae
     if args.vae_type in [14,16,18,20,24,32,64]:
-        from ..infinity.models.bsq_vae.vae import vae_model
+        try:
+            from ..infinity.models.bsq_vae.vae import vae_model
+        except Exception:
+            from infinity.models.bsq_vae.vae import vae_model
         schedule_mode = "dynamic"
         codebook_dim = args.vae_type
         codebook_size = 2**codebook_dim
@@ -383,6 +406,11 @@ def load_transformer(vae, args):
         q_bits=args.q_bits,
         quant_method=args.quant_method,
         qkv_format=args.qkv_format,
+        rescale_qk=bool(args.rescale_qk),
+        enable_fused_kv_flashattn=bool(getattr(args, "enable_fused_kv_flashattn", 0)),
+        outlier_ratio=getattr(args, 'outlier_ratio', 0.0),
+        outlier_mode=getattr(args, 'outlier_mode', 'ratio'),
+        outlier_n_sigma=getattr(args, 'outlier_n_sigma', 3.0),
     )
     return infinity
 
@@ -411,22 +439,102 @@ def add_common_arguments(parser):
     parser.add_argument('--enable_model_cache', type=int, default=0, choices=[0,1])
     parser.add_argument('--checkpoint_type', type=str, default='torch')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--seed_override', type=int, default=None,
+                        help='Override seed after loading config file')
     parser.add_argument('--bf16', type=int, default=1, choices=[0,1])
     
     # VAR-Q quantization arguments
     parser.add_argument('--enable_quantization', type=int, default=0, choices=[0,1], 
                         help='Enable VAR-Q quantization (0: disabled, 1: enabled)')
-    parser.add_argument('--q_bits', type=int, default=8, choices=[4,8,16],
-                        help='Quantization bits for VAR-Q (4, 8, or 16 bits)')
-    parser.add_argument('--quant_method', type=str, default='G_SCALE_HEAD_DIM', 
-                        choices=['G_SCALE_HEAD_DIM', 'G_SCALE_PER_HEAD', 'PER_DIM'],
+    parser.add_argument('--q_bits', type=int, default=8, choices=[3,4,8,16],
+                        help='Quantization bits for VAR-Q (3, 4, 8, or 16 bits)')
+    parser.add_argument('--quant_method', type=str, default='G_SCALE_HEAD_DIM',
+                        choices=[
+                            'G_TENSOR', 'G_SCALE_HEAD_DIM', 'G_HEAD_DIM', 'G_SCALE',
+                            'G_TOKEN', 'G_TOKEN_HEAD', 'V1_FAKE_QUANT', 'V2_ADD_NOISE'
+                        ],
                         help='VAR-Q quantization method')
     parser.add_argument('--qkv_format', type=str, default='BLHc', choices=['BLHc', 'BHLc'],
                         help='QKV tensor format for VAR-Q')
+    parser.add_argument('--rescale_qk', type=int, default=0, choices=[0,1],
+                        help='Rescale Q/K ranges for VAR-Q attention (0: disabled, 1: enabled)')
+    parser.add_argument('--enable_fused_kv_flashattn', type=int, default=0, choices=[0,1],
+                        help='Enable fused int4 KV dequant inside FlashAttention path (0: disabled, 1: enabled)')
+    parser.add_argument('--outlier_ratio', type=float, default=0.0,
+                        help='Fraction of outlier entries to preserve in full precision (0 = disabled)')
+    parser.add_argument('--outlier_mode', type=str, default='ratio', choices=['ratio', 'sigma'],
+                        help='Outlier detection mode: top-k ratio or n-sigma threshold')
+    parser.add_argument('--outlier_n_sigma', type=float, default=3.0,
+                        help='Sigma multiplier for outlier threshold (only used when outlier_mode=sigma)')
     
     # Configuration file support
     parser.add_argument('--config_file', type=str, default=None,
                         help='Path to JSON configuration file (overrides individual args)')
+
+
+def apply_varq_config_from_file(args) -> None:
+    if not getattr(args, 'config_file', None):
+        return
+    try:
+        import sys
+        import os
+        # Add VAR_Q to path
+        var_q_path = os.path.join(os.path.dirname(__file__), '..', '..', 'VAR_Q')
+        if os.path.exists(var_q_path):
+            sys.path.append(var_q_path)
+            from config_loader import VARQConfig
+
+            config = VARQConfig(args.config_file)
+            print(f"[Config] Loading configuration from {args.config_file}")
+
+            # Override args with config values
+            model_config = config.get_model_config()
+            quant_config = config.get_quantization_config()
+            inference_config = config.get_inference_config()
+            checkpoint_config = config.get_checkpoint_config()
+
+            # Update model parameters
+            if 'model_type' in model_config:
+                args.model_type = model_config['model_type']
+
+            # Update quantization parameters
+            args.enable_quantization = int(quant_config.get('enable', False))
+            args.q_bits = quant_config.get('q_bits', 8)
+            args.quant_method = quant_config.get('quant_method', 'G_SCALE_HEAD_DIM')
+            args.qkv_format = quant_config.get('qkv_format', 'BLHc')
+            args.rescale_qk = int(quant_config.get('rescale_qk', False))
+            args.enable_fused_kv_flashattn = int(quant_config.get('enable_fused_kv_flashattn', False))
+            args.outlier_ratio = float(quant_config.get('outlier_ratio', 0.0))
+            args.outlier_mode = quant_config.get('outlier_mode', 'ratio')
+            args.outlier_n_sigma = float(quant_config.get('outlier_n_sigma', 3.0))
+
+            # Update inference parameters
+            if 'cfg' in inference_config:
+                args.cfg = str(inference_config['cfg'])
+            if 'tau' in inference_config:
+                args.tau = inference_config['tau']
+            if 'seed' in inference_config:
+                args.seed = inference_config['seed']
+            if getattr(args, 'seed_override', None) is not None:
+                args.seed = args.seed_override
+
+            # Update checkpoint paths
+            if 'vae_ckpt' in checkpoint_config:
+                args.vae_path = checkpoint_config['vae_ckpt']
+            if 'model_path' in checkpoint_config:
+                args.model_path = checkpoint_config['model_path']
+
+            print(f"[Config] Quantization: {'enabled' if args.enable_quantization else 'disabled'}")
+            if args.enable_quantization:
+                print(f"[Config]   - q_bits: {args.q_bits}")
+                print(f"[Config]   - quant_method: {args.quant_method}")
+                print(f"[Config]   - qkv_format: {args.qkv_format}")
+                print(f"[Config]   - rescale_qk: {args.rescale_qk}")
+                print(f"[Config]   - enable_fused_kv_flashattn: {args.enable_fused_kv_flashattn}")
+    except ImportError:
+        print(f"[Warning] Could not load config file {args.config_file}: VAR_Q config_loader not found")
+    except Exception as e:
+        print(f"[Warning] Error loading config file {args.config_file}: {e}")
     
 
 
@@ -443,59 +551,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # Load configuration file if provided
-    if args.config_file:
-        try:
-            import sys
-            import os
-            # Add VAR_Q to path
-            var_q_path = os.path.join(os.path.dirname(__file__), '..', '..', 'VAR_Q')
-            if os.path.exists(var_q_path):
-                sys.path.append(var_q_path)
-                from config_loader import VARQConfig
-                
-                config = VARQConfig(args.config_file)
-                print(f"[Config] Loading configuration from {args.config_file}")
-                
-                # Override args with config values
-                model_config = config.get_model_config()
-                quant_config = config.get_quantization_config()
-                inference_config = config.get_inference_config()
-                checkpoint_config = config.get_checkpoint_config()
-                
-                # Update model parameters
-                if 'model_type' in model_config:
-                    args.model_type = model_config['model_type']
-                
-                # Update quantization parameters
-                args.enable_quantization = int(quant_config.get('enable', False))
-                args.q_bits = quant_config.get('q_bits', 8)
-                args.quant_method = quant_config.get('quant_method', 'G_SCALE_HEAD_DIM')
-                args.qkv_format = quant_config.get('qkv_format', 'BLHc')
-                
-                # Update inference parameters
-                if 'cfg' in inference_config:
-                    args.cfg = str(inference_config['cfg'])
-                if 'tau' in inference_config:
-                    args.tau = inference_config['tau']
-                if 'seed' in inference_config:
-                    args.seed = inference_config['seed']
-                
-                # Update checkpoint paths
-                if 'vae_ckpt' in checkpoint_config:
-                    args.vae_path = checkpoint_config['vae_ckpt']
-                if 'model_path' in checkpoint_config:
-                    args.model_path = checkpoint_config['model_path']
-                
-                print(f"[Config] Quantization: {'enabled' if args.enable_quantization else 'disabled'}")
-                if args.enable_quantization:
-                    print(f"[Config]   - q_bits: {args.q_bits}")
-                    print(f"[Config]   - quant_method: {args.quant_method}")
-                    print(f"[Config]   - qkv_format: {args.qkv_format}")
-                    
-        except ImportError:
-            print(f"[Warning] Could not load config file {args.config_file}: VAR_Q config_loader not found")
-        except Exception as e:
-            print(f"[Warning] Error loading config file {args.config_file}: {e}")
+    apply_varq_config_from_file(args)
 
     # parse cfg
     args.cfg = list(map(float, args.cfg.split(',')))

@@ -27,6 +27,7 @@ class VAR(nn.Module):
         patch_nums=(1, 2, 3, 4, 5, 6, 8, 10, 13, 16),   # 10 steps by default
         flash_if_available=True, fused_if_available=True,
         q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc',enable_quantization=False,
+        rescale_qk=False,
     ):
         super().__init__()
         # 0. hyperparameters
@@ -91,7 +92,7 @@ class VAR(nn.Module):
                 attn_l2_norm=attn_l2_norm,
                 flash_if_available=flash_if_available, fused_if_available=fused_if_available,
                 q_bits=q_bits, quant_method=quant_method, qkv_format=qkv_format,
-                enable_quantization=enable_quantization,
+                enable_quantization=enable_quantization, rescale_qk=rescale_qk,
             )
             for block_idx in range(depth)
         ])

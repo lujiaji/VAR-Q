@@ -72,6 +72,14 @@ if __name__ == '__main__':
                 args.quant_method = quant_config['quant_method']
             if 'qkv_format' in quant_config:
                 args.qkv_format = quant_config['qkv_format']
+            if 'rescale_qk' in quant_config:
+                args.rescale_qk = int(quant_config['rescale_qk'])
+            if 'outlier_ratio' in quant_config:
+                args.outlier_ratio = float(quant_config['outlier_ratio'])
+            if 'outlier_mode' in quant_config:
+                args.outlier_mode = quant_config['outlier_mode']
+            if 'outlier_n_sigma' in quant_config:
+                args.outlier_n_sigma = float(quant_config['outlier_n_sigma'])
             if 'cfg' in inference_config:
                 args.cfg = inference_config['cfg']
             if 'tau' in inference_config:
@@ -108,6 +116,7 @@ if __name__ == '__main__':
                 print(f"[Config]   - q_bits: {args.q_bits}")
                 print(f"[Config]   - quant_method: {args.quant_method}")
                 print(f"[Config]   - qkv_format: {args.qkv_format}")
+                print(f"[Config]   - rescale_qk: {args.rescale_qk}")
         except Exception as e:
             print(f"[Error] Failed to load configuration: {e}")
             print("[Warning] Continuing with command-line arguments...")

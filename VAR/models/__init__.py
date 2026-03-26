@@ -109,6 +109,7 @@ def build_vae_var_from_config(config: Dict[str, Any], device: str = None) -> Tup
         quant_method=quantization_config.get('quant_method', 'G_SCALE_HEAD_DIM'),
         qkv_format=quantization_config.get('qkv_format', 'BLHc'),
         enable_quantization=quantization_config.get('enable', False),
+        rescale_qk=quantization_config.get('rescale_qk', False),
     ).to(device)
     
     # Initialize weights with hard-coded parameters

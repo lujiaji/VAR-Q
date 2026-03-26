@@ -35,6 +35,9 @@ if __name__ == '__main__':
     parser.add_argument('--load_rewrite_prompt_cache', type=int, default=1, choices=[0,1])
     args = parser.parse_args()
 
+    # Load VAR-Q configuration file if provided
+    apply_varq_config_from_file(args)
+
     # parse cfg
     args.cfg = list(map(float, args.cfg.split(',')))
     if len(args.cfg) == 1:

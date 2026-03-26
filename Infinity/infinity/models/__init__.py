@@ -3,7 +3,12 @@ from timm.loss import SoftTargetCrossEntropy
 
 from timm.models.layers import DropPath
 
-from Infinity.infinity.models.infinity import Infinity, sample_with_top_k_top_p_also_inplace_modifying_logits_
+try:
+    # Preferred import when used as local package.
+    from .infinity import Infinity, sample_with_top_k_top_p_also_inplace_modifying_logits_
+except Exception:
+    # Backward-compatible path used by some external launchers.
+    from Infinity.infinity.models.infinity import Infinity, sample_with_top_k_top_p_also_inplace_modifying_logits_
 
 def _ex_repr(self):
     return ', '.join(

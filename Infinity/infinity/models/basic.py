@@ -27,6 +27,52 @@ except ImportError:
     print("Warning: VAR_Q not found, quantization will be disabled")
     VAR_Q = None
 
+
+# ---------- Optional Q/K/V/O dump capture (offline MSE) ----------
+_QKVO_DUMP_CAPTURE = {
+    "enabled": False,
+    "dump_dir": "",
+    "run_tag": "",
+    "call_idx": 0,
+    "restore_rescale_for_dump": True,
+}
+
+
+def enable_qkvo_dump_capture(dump_dir: str, run_tag: str, restore_rescale_for_dump: bool = True):
+    _QKVO_DUMP_CAPTURE["enabled"] = True
+    _QKVO_DUMP_CAPTURE["dump_dir"] = dump_dir
+    _QKVO_DUMP_CAPTURE["run_tag"] = run_tag
+    _QKVO_DUMP_CAPTURE["call_idx"] = 0
+    _QKVO_DUMP_CAPTURE["restore_rescale_for_dump"] = bool(restore_rescale_for_dump)
+    os.makedirs(os.path.join(dump_dir, run_tag), exist_ok=True)
+
+
+def disable_qkvo_dump_capture():
+    _QKVO_DUMP_CAPTURE["enabled"] = False
+    _QKVO_DUMP_CAPTURE["dump_dir"] = ""
+    _QKVO_DUMP_CAPTURE["run_tag"] = ""
+    _QKVO_DUMP_CAPTURE["call_idx"] = 0
+    _QKVO_DUMP_CAPTURE["restore_rescale_for_dump"] = True
+
+
+def _maybe_dump_qkvo_tensors(block_idx: int, scale_ind, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, o: torch.Tensor):
+    if not _QKVO_DUMP_CAPTURE["enabled"]:
+        return
+    call_idx = _QKVO_DUMP_CAPTURE["call_idx"]
+    _QKVO_DUMP_CAPTURE["call_idx"] = call_idx + 1
+    run_dir = os.path.join(_QKVO_DUMP_CAPTURE["dump_dir"], _QKVO_DUMP_CAPTURE["run_tag"])
+    save_path = os.path.join(run_dir, f"call_{call_idx:06d}_blk{int(block_idx):02d}.pt")
+    payload = {
+        "block_idx": int(block_idx),
+        "scale_ind": str(scale_ind),
+        "qkv_format": "BLHc" if q.dim() == 4 and q.shape[1] == o.shape[1] else "BHLc",
+        "q": q.detach().to(device="cpu", dtype=torch.float16),
+        "k": k.detach().to(device="cpu", dtype=torch.float16),
+        "v": v.detach().to(device="cpu", dtype=torch.float16),
+        "o": o.detach().to(device="cpu", dtype=torch.float16),
+    }
+    torch.save(payload, save_path)
+
 # Import flash_attn's fused ops
 try:
     from flash_attn.ops.layer_norm import dropout_add_layer_norm
@@ -205,6 +251,9 @@ class SelfAttention(nn.Module):
         proj_drop=0., tau=1, cos_attn=False, customized_flash_attn=True, use_flex_attn=False, 
         batch_size=2, pad_to_multiplier=1, rope2d_normalized_by_hw=0,
         q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=False,
+        rescale_qk=False,
+        enable_fused_kv_flashattn=False,
+        outlier_ratio=0.0, outlier_mode='ratio', outlier_n_sigma=3.0,
     ):
         """
         :param embed_dim: model's width
@@ -222,9 +271,8 @@ class SelfAttention(nn.Module):
         self.tau, self.cos_attn = tau, cos_attn
         if self.cos_attn:
             self.scale = 1
-            size = (1, 1, self.num_heads, 1) if self.using_flash else (1, self.num_heads, 1, 1)
-            # size: 11H1 or 1H11
-            self.scale_mul_1H11 = nn.Parameter(torch.full(size=size, fill_value=4.0).log(), requires_grad=True)
+            # Always store in BHLc layout (1, H, 1, 1) for checkpoint compatibility
+            self.scale_mul_1H11 = nn.Parameter(torch.full(size=(1, self.num_heads, 1, 1), fill_value=4.0).log(), requires_grad=True)
             self.max_scale_mul = torch.log(torch.tensor(100)).item()
         else:
             self.scale = 1 / math.sqrt(self.head_dim) / self.tau
@@ -239,6 +287,7 @@ class SelfAttention(nn.Module):
         self.caching = False    # kv caching: only used during inference
         self.cached_k = None    # kv caching: only used during inference
         self.cached_v = None    # kv caching: only used during inference
+        self.cached_theta = None
 
         self.batch_size = batch_size
         self.use_flex_attn = use_flex_attn
@@ -247,19 +296,92 @@ class SelfAttention(nn.Module):
         self.quant_method = quant_method
         self.qkv_format = qkv_format
         self.enable_quantization = enable_quantization
+        self.rescale_qk = rescale_qk
+        self.enable_fused_kv_flashattn = bool(enable_fused_kv_flashattn)
         self.rope2d_normalized_by_hw = rope2d_normalized_by_hw
+        self.outlier_ratio = outlier_ratio
+        self.outlier_mode = outlier_mode
+        self.outlier_n_sigma = outlier_n_sigma
         self.block_idx = 0  # Will be set by the parent block
+        if self.enable_fused_kv_flashattn and int(self.q_bits) != 4:
+            raise ValueError("enable_fused_kv_flashattn requires int4 quantization (q_bits == 4).")
 
     
+    def _update_fused_payload_incremental(self):
+        """Incrementally update kv_group and group_scale from the latest quant step.
+
+        For G_SCALE_HEAD_DIM each step produces a single scale (1, H, c) shared by
+        all L_new tokens.  We unconditionally create one new group per step to avoid
+        any GPU-synchronising comparison (torch.equal).  The number of groups equals
+        the number of autoregressive steps (~64 for VAR), which is negligible.
+
+        Returns (k_packed, v_packed, k_group_scale, v_group_scale, kv_group) for FA.
+        """
+        k_scale_step = self.k_quant.scale[0]   # (1, H, c)
+        v_scale_step = self.v_quant.scale[0]   # (1, H, c)
+        L_new = int(self.k_quant.quantized_item.size(self.k_quant.dim_cat))
+        dev = k_scale_step.device
+        bsz_packed = int(self.k_quant.cached_item.size(0))
+
+        gid = self._fused_num_groups
+        self._fused_num_groups += 1
+
+        if self._fused_k_group_scale is None:
+            self._fused_k_group_scale = k_scale_step.contiguous()
+            self._fused_v_group_scale = v_scale_step.contiguous()
+        else:
+            self._fused_k_group_scale = torch.cat(
+                [self._fused_k_group_scale, k_scale_step], dim=0)
+            self._fused_v_group_scale = torch.cat(
+                [self._fused_v_group_scale, v_scale_step], dim=0)
+
+        old_len = self._fused_seq_len
+        buf = self._fused_kv_group_1d
+        needed = old_len + L_new
+        if buf is None or needed > buf.size(0):
+            new_cap = max(needed * 2, needed + 256)
+            new_buf = torch.empty(new_cap, device=dev, dtype=torch.int32)
+            if buf is not None and old_len > 0:
+                new_buf[:old_len] = buf[:old_len]
+            buf = new_buf
+        buf[old_len:needed] = gid
+        self._fused_kv_group_1d = buf
+        self._fused_seq_len = needed
+
+        kv_group_view = buf[:needed].unsqueeze(0)
+        if bsz_packed > 1:
+            kv_group_view = kv_group_view.expand(bsz_packed, -1).contiguous()
+
+        return (
+            self.k_quant.cached_item,
+            self.v_quant.cached_item,
+            self._fused_k_group_scale,
+            self._fused_v_group_scale,
+            kv_group_view,
+        )
+
     def kv_caching(self, enable: bool): # kv caching: only used during inference
         if enable:
             self.caching = True
             self.cached_k = None
             self.cached_v = None
+            self.cached_theta = None
+            self._fused_kv_group = None
+            self._fused_kv_group_1d = None
+            self._fused_k_group_scale = None
+            self._fused_v_group_scale = None
+            self._fused_num_groups = 0
+            self._fused_seq_len = 0
             #### Init VAR-Q for K and V (only if quantization is enabled) ####
             if self.enable_quantization and VAR_Q is not None:
-                self.k_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method, blk_idx=self.block_idx)
-                self.v_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method, blk_idx=self.block_idx)
+                self.k_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method,
+                                     blk_idx=self.block_idx, rescale_qk=self.rescale_qk,
+                                     outlier_ratio=self.outlier_ratio, outlier_mode=self.outlier_mode,
+                                     outlier_n_sigma=self.outlier_n_sigma)
+                self.v_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method,
+                                     blk_idx=self.block_idx, rescale_qk=self.rescale_qk,
+                                     outlier_ratio=self.outlier_ratio, outlier_mode=self.outlier_mode,
+                                     outlier_n_sigma=self.outlier_n_sigma)
             else:
                 self.k_quant = None
                 self.v_quant = None
@@ -267,6 +389,13 @@ class SelfAttention(nn.Module):
             self.caching = False
             self.cached_k = None
             self.cached_v = None
+            self.cached_theta = None
+            self._fused_kv_group = None
+            self._fused_kv_group_1d = None
+            self._fused_k_group_scale = None
+            self._fused_v_group_scale = None
+            self._fused_num_groups = 0
+            self._fused_seq_len = 0
             if hasattr(self, 'k_quant') and self.k_quant is not None:
                 del self.k_quant, self.v_quant
 
@@ -314,7 +443,9 @@ class SelfAttention(nn.Module):
                 self.k_quant.qkv_format = self.v_quant.qkv_format = 'BHLc'   # q or k or v: BHLc
         
         if self.cos_attn:   # always True
-            scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp() # 11H1 (flash), or 1H11 (not flash)
+            scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp() # stored as 1H11 (BHLc)
+            if self.using_flash:
+                scale_mul = scale_mul.permute(0, 2, 1, 3)  # 1H11 -> 11H1 (BLHc)
             q = F.normalize(q, dim=-1, eps=1e-12).mul(scale_mul).contiguous()   # fp32
             k = F.normalize(k, dim=-1, eps=1e-12).contiguous()                  # fp32
             v = v.contiguous()                                                  # bf16
@@ -323,11 +454,82 @@ class SelfAttention(nn.Module):
             k = k.contiguous()      # bf16
             v = v.contiguous()      # bf16
         if rope2d_freqs_grid is not None:
-            q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind) #, freqs_cis=freqs_cis)
+            if self.using_flash:
+                # apply_rotary_emb expects BHLc; convert BLHc -> BHLc, apply, convert back
+                q, k = q.transpose(1, 2), k.transpose(1, 2)
+                q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
+                q, k = q.transpose(1, 2), k.transpose(1, 2)
+            else:
+                q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
+
+        theta_cur = None
+        theta_tok_cur = None
+        fused_kv_payload = None
+        if self.enable_quantization and self.k_quant is not None:
+            q, k, theta_cur = self.k_quant.rescale_qk(q, k, return_theta=True)
+            if theta_cur is not None:
+                # Expand scalar theta to token-aligned tensor for cached-K restoration in dump.
+                theta_tok_cur = torch.ones_like(k[..., :1]) * theta_cur
+
+        # def rescale_qk(q: torch.Tensor, k: torch.Tensor):
+        #     range_q = q.abs().max()
+        #     range_k = k.abs().max()
+        #     theta = torch.sqrt((range_k + 1e-6) / (range_q + 1e-6))
+        #     q = q * theta
+        #     k = k / theta
+        #     return q, k
+        # q, k = rescale_qk(q, k)
         if self.caching:    # kv caching: only used during inference
             if self.enable_quantization and self.k_quant is not None and self.v_quant is not None:
-                k = self.k_quant.use_var_q(k).contiguous()
-                v = self.v_quant.use_var_q(v).contiguous()
+                # Inference-only prototype constraints:
+                # int4 + single-group + non-split + no training/dropout/autograd.
+                want_fused = bool(self.enable_fused_kv_flashattn)
+                try_fused_int4 = (
+                    want_fused
+                    and self.using_flash
+                    and attn_bias_or_two_vector is None
+                    and int(self.q_bits) == 4
+                    and self.quant_method == 'G_SCALE_HEAD_DIM'
+                    and float(self.outlier_ratio) == 0.0
+                )
+                if want_fused and not try_fused_int4:
+                    raise RuntimeError(
+                        "unsupported: fused quantized-KV forward requires "
+                        "using_flash=True, inference mode (attn_bias_or_two_vector is None), "
+                        "q_bits==4, quant_method=='G_SCALE_HEAD_DIM', outlier_ratio==0.0"
+                    )
+                if try_fused_int4:
+                    self.k_quant.quant_and_cache(k)
+                    self.v_quant.quant_and_cache(v)
+                    k_meta = self.k_quant._pack_meta
+                    v_meta = self.v_quant._pack_meta
+                    can_fuse = (
+                        self.k_quant.cached_item is not None
+                        and self.v_quant.cached_item is not None
+                        and self.k_quant.cached_scale is not None
+                        and self.v_quant.cached_scale is not None
+                        and k_meta is not None and v_meta is not None
+                        and int(k_meta.get("bits", -1)) == 4
+                        and int(v_meta.get("bits", -1)) == 4
+                        and self.k_quant.cached_scale.dim() == 4
+                        and self.v_quant.cached_scale.dim() == 4
+                        and self.k_quant.cached_scale.size(1) > 0
+                        and self.v_quant.cached_scale.size(1) > 0
+                    )
+                    if can_fuse:
+                        fused_kv_payload = self._update_fused_payload_incremental()
+                    else:
+                        raise RuntimeError(
+                            "unsupported: fused quantized-KV forward requires valid int4 packed cache and scale tensors"
+                        )
+                else:
+                    k = self.k_quant.use_var_q(k).contiguous()
+                    v = self.v_quant.use_var_q(v).contiguous()
+                if theta_cur is not None:
+                    if self.cached_theta is None:
+                        self.cached_theta = theta_tok_cur
+                    else:
+                        self.cached_theta = torch.cat((self.cached_theta, theta_tok_cur), dim=L_dim)
             else:
                 if self.cached_k is None: 
                     self.cached_k = k
@@ -335,13 +537,48 @@ class SelfAttention(nn.Module):
                 else: 
                     k = self.cached_k = torch.cat((self.cached_k, k), dim=L_dim)
                     v = self.cached_v = torch.cat((self.cached_v, v), dim=L_dim)
+
+        q_dump, k_dump = q, k
+        if (
+            _QKVO_DUMP_CAPTURE["enabled"]
+            and _QKVO_DUMP_CAPTURE["restore_rescale_for_dump"]
+            and theta_cur is not None
+        ):
+            # Undo rescale in dumped tensors:
+            # q': q*theta -> q = q'/theta
+            # k': k/theta, then k_qdq -> restore by k_qdq*theta
+            q_dump = q / theta_cur
+            if self.caching and self.cached_theta is not None:
+                k_dump = k * self.cached_theta
+            else:
+                k_dump = k * theta_cur
         
         if self.using_flash:
             if attn_bias_or_two_vector is not None: # training
                 kw = dict(VAR_visible_kvlen=attn_bias_or_two_vector[0], VAR_invisible_qlen=attn_bias_or_two_vector[1])
             else:                                   # inference (autoregressive sampling)
                 kw = dict()
-            oup = flash_attn_func(q.to(v.dtype), k.to(v.dtype), v, dropout_p=0, softmax_scale=self.scale, **kw).view(B, L, C)
+            if fused_kv_payload is not None:
+                from flash_attn import flash_attn_func_quant_kv_int4
+                k_packed, v_packed, k_scale, v_scale, kv_group = fused_kv_payload
+                oup = flash_attn_func_quant_kv_int4(
+                    q.to(torch.bfloat16),
+                    k_packed,
+                    v_packed,
+                    k_scale,
+                    v_scale,
+                    kv_group=kv_group,
+                    quant_group_id=0,
+                    dropout_p=0.0,
+                    softmax_scale=self.scale,
+                    causal=False,
+                ).reshape(B, L, C)
+            else:
+                if self.enable_fused_kv_flashattn:
+                    raise RuntimeError(
+                        "unsupported: enable_fused_kv_flashattn is set but fused payload was not prepared"
+                    )
+                oup = flash_attn_func(q.to(v.dtype), k.to(v.dtype), v, dropout_p=0, softmax_scale=self.scale, **kw).reshape(B, L, C)
         else:
             # if self.cos_attn: q, k are in fp32; v is in bf16
             # else: q, k, v are in bf16
@@ -350,8 +587,10 @@ class SelfAttention(nn.Module):
             else:
                 oup = slow_attn(query=q, key=k, value=v, scale=self.scale, attn_mask=attn_bias_or_two_vector, dropout_p=0).transpose(1, 2).reshape(B, L, C)
             # oup: bf16
-        
-        return self.proj_drop(self.proj(oup))
+        out = self.proj_drop(self.proj(oup))
+        _maybe_dump_qkvo_tensors(self.block_idx, scale_ind, q_dump, k_dump, v, out)
+
+        return out
     
     def extra_repr(self) -> str:
         tail = ''
@@ -453,6 +692,9 @@ class SelfAttnBlock(nn.Module):
         num_heads, mlp_ratio=4., drop=0., drop_path=0., tau=1, cos_attn=False,
         swiglu=False, customized_flash_attn=False, fused_mlp=False, fused_norm_func=None, checkpointing_sa_only=False,
         q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=False,
+        rescale_qk=False,
+        enable_fused_kv_flashattn=False,
+        outlier_ratio=0.0, outlier_mode='ratio', outlier_n_sigma=3.0,
     ):
         super(SelfAttnBlock, self).__init__()
         self.C, self.D = embed_dim, cond_dim
@@ -461,6 +703,9 @@ class SelfAttnBlock(nn.Module):
         self.attn = SelfAttention(
             embed_dim=embed_dim, num_heads=num_heads, proj_drop=drop, tau=tau, cos_attn=cos_attn, customized_flash_attn=customized_flash_attn,
             q_bits=q_bits, quant_method=quant_method, qkv_format=qkv_format, enable_quantization=enable_quantization,
+            rescale_qk=rescale_qk,
+            enable_fused_kv_flashattn=enable_fused_kv_flashattn,
+            outlier_ratio=outlier_ratio, outlier_mode=outlier_mode, outlier_n_sigma=outlier_n_sigma,
         )
         self.using_swiglu = swiglu
         self.ffn = (FFNSwiGLU if swiglu else FFN)(in_features=embed_dim, hidden_features=round(embed_dim * mlp_ratio / 256) * 256, drop=drop, fused_mlp=fused_mlp)
@@ -504,6 +749,9 @@ class CrossAttnBlock(nn.Module):
         swiglu=False, customized_flash_attn=False, fused_mlp=False, fused_norm_func=None, checkpointing_sa_only=False,
         use_flex_attn=False, batch_size=2, pad_to_multiplier=1, apply_rope2d=False, rope2d_normalized_by_hw=False,
         q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=False,
+        rescale_qk=False,
+        enable_fused_kv_flashattn=False,
+        outlier_ratio=0.0, outlier_mode='ratio', outlier_n_sigma=3.0,
     ):
         super(CrossAttnBlock, self).__init__()
         self.C, self.D = embed_dim, cond_dim
@@ -513,6 +761,9 @@ class CrossAttnBlock(nn.Module):
             embed_dim=embed_dim, num_heads=num_heads, proj_drop=drop, tau=tau, cos_attn=cos_attn, customized_flash_attn=customized_flash_attn,
             use_flex_attn=use_flex_attn, batch_size=batch_size, pad_to_multiplier=pad_to_multiplier, rope2d_normalized_by_hw=rope2d_normalized_by_hw,
             q_bits=q_bits, quant_method=quant_method, qkv_format=qkv_format, enable_quantization=enable_quantization,
+            rescale_qk=rescale_qk,
+            enable_fused_kv_flashattn=enable_fused_kv_flashattn,
+            outlier_ratio=outlier_ratio, outlier_mode=outlier_mode, outlier_n_sigma=outlier_n_sigma,
         )
         self.ca = CrossAttention(embed_dim=embed_dim, kv_dim=kv_dim, num_heads=num_heads, proj_drop=drop, cos_attn=cos_attn,)
         self.using_swiglu = swiglu

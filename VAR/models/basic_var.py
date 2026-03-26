@@ -72,6 +72,7 @@ class SelfAttention(nn.Module):
         self, block_idx, embed_dim=768, num_heads=12,
         attn_drop=0., proj_drop=0., attn_l2_norm=False, flash_if_available=True,
         q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=False,
+        rescale_qk=False,
     ):
         super().__init__()
         assert embed_dim % num_heads == 0
@@ -81,6 +82,7 @@ class SelfAttention(nn.Module):
         self.quant_method = quant_method
         self.qkv_format = qkv_format
         self.enable_quantization = enable_quantization
+        self.rescale_qk = rescale_qk
         if self.attn_l2_norm:
             self.scale = 1
             self.scale_mul_1H11 = nn.Parameter(torch.full(size=(1, self.num_heads, 1, 1), fill_value=4.0).log(), requires_grad=True)
@@ -106,8 +108,10 @@ class SelfAttention(nn.Module):
             self.caching, self.cached_k, self.cached_v = True, None, None
             #### Init VAR-Q for K and V (only if quantization is enabled) ####
             if self.enable_quantization:
-                self.k_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method, blk_idx=self.block_idx)
-                self.v_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method, blk_idx=self.block_idx)
+                self.k_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method,
+                                     blk_idx=self.block_idx, rescale_qk=self.rescale_qk)
+                self.v_quant = VAR_Q(quant_bits=self.q_bits, qkv_format=self.qkv_format, quant_method=self.quant_method,
+                                     blk_idx=self.block_idx, rescale_qk=self.rescale_qk)
             else:
                 self.k_quant = None
                 self.v_quant = None
@@ -143,6 +147,7 @@ class SelfAttention(nn.Module):
         if self.caching:
             ########## Implement VAR-Q here ##########
             if self.enable_quantization:
+                q, k = self.k_quant.rescale_qk(q, k)
                 k = self.k_quant.use_var_q(k)
                 v = self.v_quant.use_var_q(v)
             else:
@@ -176,6 +181,7 @@ class AdaLNSelfAttn(nn.Module):
         num_heads, mlp_ratio=4., drop=0., attn_drop=0., drop_path=0., attn_l2_norm=False,
         flash_if_available=False, fused_if_available=True,
         q_bits=8, quant_method='G_SCALE_HEAD_DIM', qkv_format='BLHc', enable_quantization=True,
+        rescale_qk=False,
     ):
         super(AdaLNSelfAttn, self).__init__()
         self.block_idx, self.last_drop_p, self.C = block_idx, last_drop_p, embed_dim
@@ -184,7 +190,7 @@ class AdaLNSelfAttn(nn.Module):
         self.attn = SelfAttention(block_idx=block_idx, embed_dim=embed_dim, num_heads=num_heads, 
                                 attn_drop=attn_drop, proj_drop=drop, attn_l2_norm=attn_l2_norm, 
                                 flash_if_available=flash_if_available, q_bits=q_bits, quant_method=quant_method, 
-                                qkv_format=qkv_format, enable_quantization=enable_quantization)
+                                qkv_format=qkv_format, enable_quantization=enable_quantization, rescale_qk=rescale_qk)
         self.ffn = FFN(in_features=embed_dim, hidden_features=round(embed_dim * mlp_ratio), drop=drop, fused_if_available=fused_if_available)
         
         self.ln_wo_grad = norm_layer(embed_dim, elementwise_affine=False)

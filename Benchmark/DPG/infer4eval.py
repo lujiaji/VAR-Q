@@ -10,9 +10,10 @@ import sys
 from pytorch_lightning import seed_everything
 
 # Add project paths
-project_root = 'VAR-Q'
-sys.path.append(project_root)
-sys.path.append(os.path.join(project_root, 'Infinity'))
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, '..', '..'))
+sys.path.append(_PROJECT_ROOT)
+sys.path.append(os.path.join(_PROJECT_ROOT, 'Infinity'))
 
 from infinity.utils.csv_util import load_csv_as_dicts, write_dicts2csv_file
 from tools.run_infinity import *
@@ -20,10 +21,14 @@ from tools.run_infinity import _import_dynamic_resolution
 from conf import HF_TOKEN, HF_HOME
 
 # Add VAR_Q to path for config loading
-var_q_path = 'VAR-Q/VAR_Q'
+VARQConfig = None
+var_q_path = os.path.join(_PROJECT_ROOT, 'VAR_Q')
 if os.path.exists(var_q_path):
     sys.path.append(var_q_path)
-    from config_loader import VARQConfig
+    try:
+        from config_loader import VARQConfig
+    except Exception:
+        VARQConfig = None
 
 # set environment variables
 os.environ['HF_TOKEN'] = HF_TOKEN
@@ -44,6 +49,8 @@ if __name__ == '__main__':
     if args.config_file and os.path.exists(args.config_file):
         print(f"[Config] Loading configuration from {args.config_file}")
         try:
+            if VARQConfig is None:
+                raise RuntimeError("VARQConfig is not available (VAR_Q path not found)")
             config = VARQConfig(args.config_file)
             model_config = config.get_model_config()
             quant_config = config.get_quantization_config()
@@ -65,12 +72,22 @@ if __name__ == '__main__':
                 args.quant_method = quant_config['quant_method']
             if 'qkv_format' in quant_config:
                 args.qkv_format = quant_config['qkv_format']
+            if 'rescale_qk' in quant_config:
+                args.rescale_qk = int(quant_config['rescale_qk'])
+            if 'outlier_ratio' in quant_config:
+                args.outlier_ratio = float(quant_config['outlier_ratio'])
+            if 'outlier_mode' in quant_config:
+                args.outlier_mode = quant_config['outlier_mode']
+            if 'outlier_n_sigma' in quant_config:
+                args.outlier_n_sigma = float(quant_config['outlier_n_sigma'])
             if 'cfg' in inference_config:
                 args.cfg = inference_config['cfg']
             if 'tau' in inference_config:
                 args.tau = inference_config['tau']
             if 'seed' in inference_config:
                 args.seed = inference_config['seed']
+            if getattr(args, 'seed_override', None) is not None:
+                args.seed = args.seed_override
             if 'h_div_w' in inference_config:
                 args.h_div_w_template = inference_config['h_div_w']
             
@@ -101,6 +118,7 @@ if __name__ == '__main__':
                 print(f"[Config]   - q_bits: {args.q_bits}")
                 print(f"[Config]   - quant_method: {args.quant_method}")
                 print(f"[Config]   - qkv_format: {args.qkv_format}")
+                print(f"[Config]   - rescale_qk: {args.rescale_qk}")
         except Exception as e:
             print(f"[Error] Failed to load configuration: {e}")
             print("[Warning] Continuing with command-line arguments...")
@@ -118,7 +136,10 @@ if __name__ == '__main__':
             args.cfg = args.cfg[0]
     # If cfg is already a number from config, keep it as is
     
-    with open(args.metadata_file) as fp:
+    metadata_file = args.metadata_file
+    if not os.path.isabs(metadata_file):
+        metadata_file = os.path.join(_THIS_DIR, metadata_file)
+    with open(metadata_file) as fp:
         metadatas = [json.loads(line) for line in fp]
     total=len(metadatas);print(f'total {total} prompts')
 
@@ -182,7 +203,7 @@ if __name__ == '__main__':
             'tuple': '',
             'question_natural_language':''
         })
-    csv_path ='Benchmark/DPG/dpg_metadata.csv'
+    csv_path ='/home/jiaji_lu/AR/VAR-Q/Benchmark/DPG/dpg_metadata.csv'
     fieldnames = [
         'item_id','text','keywords','proposition_id',
         'dependency','category_broad','category_detailed',
@@ -193,4 +214,3 @@ if __name__ == '__main__':
         writer.writeheader()
         writer.writerows(rows)
     print(f"save csv as: {csv_path}")
-

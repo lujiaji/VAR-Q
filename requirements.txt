@@ -22,5 +22,3 @@ opencv-python
 Pillow
 huggingface_hub
 numpy
-pytz
-typed-argument-parser
