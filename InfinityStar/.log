@@ -1,0 +1,47 @@
+nohup: ignoring input
+bash: /home/jiaji_lu/conda/envs/varq/lib/libtinfo.so.6: no version information available (required by bash)
+==========================================
+VBench parallel evaluation (VARQ)
+videos_path: /home/jiaji_lu/AR/VAR-Q/Benchmark/outputs/vbench_eval_varq_480p/gpu0_20260327_163340/videos
+results_dir: /home/jiaji_lu/AR/VAR-Q/Benchmark/outputs/vbench_results_varq_480p/gpu0_20260327_163340
+model_name: infinitystar_varq_480p_gpu0_20260327_163340
+gpu_list: 0,1,2,3,4,5,6
+num_dims: 16
+num_gpus: 7
+==========================================
+[GPU 0] Start subject_consistency
+[GPU 1] Start background_consistency
+[GPU 2] Start aesthetic_quality
+[GPU 3] Start imaging_quality
+[GPU 4] Start object_class
+[GPU 5] Start multiple_objects
+[GPU 6] Start color
+[GPU 1] Start spatial_relationship
+[GPU 4] Done object_class
+[GPU 4] Start scene
+[GPU 4] Done scene
+[GPU 4] Start temporal_style
+[GPU 4] Done temporal_style
+[GPU 4] Start overall_consistency
+[GPU 4] Done overall_consistency
+[GPU 4] Start human_action
+[GPU 4] Done human_action
+[GPU 4] Start temporal_flickering
+[GPU 4] Done temporal_flickering
+[GPU 4] Start motion_smoothness
+[GPU 4] Done motion_smoothness
+[GPU 4] Start dynamic_degree
+[GPU 4] Done dynamic_degree
+[GPU 4] Start appearance_style
+[GPU 5] Done multiple_objects
+[GPU 6] Done color
+[GPU 1] Done spatial_relationship
+[GPU 2] Done aesthetic_quality
+[GPU 0] Done subject_consistency
+[GPU 3] Done imaging_quality
+[GPU 4] Done appearance_style
+All dimensions finished, combine results...
+
+📊 合并完成:
+   - 结果项: 0
+   - 视频信息: 0
