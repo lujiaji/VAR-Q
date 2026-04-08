@@ -12,6 +12,7 @@ import os.path as osp
 import random
 import re
 import sys
+import traceback
 from pathlib import Path
 
 import torch
@@ -46,6 +47,58 @@ def prompt_video_basename(prompt_en: str, sample_idx: int) -> str:
     max_stem = 255 - len(suffix.encode("utf-8"))
     stem = _sanitize_stem(prompt_en, max_stem_bytes=max_stem)
     return f"{stem}{suffix}"
+
+
+def _resolve_saved_path(requested_path: Path) -> Path:
+    """
+    Resolve actual file path written by save_video.
+    save_video may switch .mp4 to .jpg for single-frame outputs.
+    """
+    if requested_path.exists():
+        return requested_path
+    if requested_path.suffix.lower() == ".mp4":
+        jpg_path = requested_path.with_suffix(".jpg")
+        if jpg_path.exists():
+            return jpg_path
+    return requested_path
+
+
+def _save_and_verify_video(output_frames, fps: int, requested_path: Path) -> Path:
+    save_video(output_frames, fps=fps, save_filepath=str(requested_path))
+    actual_path = _resolve_saved_path(requested_path)
+    if not actual_path.exists():
+        raise FileNotFoundError(
+            f"save_video returned but file not found. requested={requested_path}, resolved={actual_path}"
+        )
+    file_size = actual_path.stat().st_size
+    if file_size <= 0:
+        raise RuntimeError(f"saved file is empty: {actual_path}")
+    print(
+        f"[Save][OK] path={actual_path} size_bytes={file_size}",
+        flush=True,
+    )
+    return actual_path
+
+
+def _load_existing_metadata(metadata_path: Path) -> dict[tuple[int, int], dict]:
+    if not metadata_path.is_file():
+        return {}
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            items = json.load(f)
+    except Exception:
+        return {}
+    if not isinstance(items, list):
+        return {}
+    out = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        prompt_idx = item.get("prompt_idx")
+        sample_idx = item.get("sample_idx")
+        if isinstance(prompt_idx, int) and isinstance(sample_idx, int):
+            out[(prompt_idx, sample_idx)] = item
+    return out
 
 
 def build_infer_args(checkpoints_dir: str, quant_config: dict) -> Args:
@@ -113,6 +166,11 @@ def main():
         choices=["refined", "prompt_en"],
         help="Which field feeds the model: refined_prompt (default) or original prompt_en (matches VBench filename semantics).",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip samples whose output file already exists and rebuild metadata incrementally.",
+    )
     args_cmd = parser.parse_args()
 
     if "CUDA_VISIBLE_DEVICES" not in os.environ or os.environ["CUDA_VISIBLE_DEVICES"] == "":
@@ -133,13 +191,24 @@ def main():
 
     output_dir = Path(args_cmd.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    write_test = output_dir / ".write_test.tmp"
+    try:
+        with open(write_test, "w", encoding="utf-8") as f:
+            f.write("ok")
+        write_test.unlink()
+    except Exception as e:
+        raise RuntimeError(f"output_dir is not writable: {output_dir}. err={e}") from e
 
     print(f"[Info] prompts: {len(prompts)}, samples/prompt: {args_cmd.num_samples}, sample_start_idx: {args_cmd.sample_start_idx}")
     print(f"[Info] filename mode: {args_cmd.filename_mode}")
     print(f"[Info] output dir: {output_dir}")
+    print(f"[Info] resume mode: {args_cmd.resume}")
+    print(f"[Info] output dir writable check passed: {output_dir}", flush=True)
     pipe = InferencePipe(args)
 
-    results = []
+    metadata_path = output_dir / "metadata.json"
+    existing_results = _load_existing_metadata(metadata_path)
+    results_by_key = dict(existing_results)
     total = len(prompts) * args_cmd.num_samples
     pbar = tqdm(total=total, desc="Generating", unit="video")
 
@@ -152,6 +221,35 @@ def main():
 
         for sample_offset in range(args_cmd.num_samples):
             sample_idx = args_cmd.sample_start_idx + sample_offset
+            if args_cmd.filename_mode == "prompt":
+                fname = prompt_video_basename(prompt_en, sample_idx)
+            else:
+                fname = f"{prompt_idx:03d}-{sample_idx:02d}.mp4"
+            vpath = output_dir / fname
+            resolved_existing = _resolve_saved_path(vpath)
+            key = (prompt_idx, sample_idx)
+
+            if args_cmd.resume and resolved_existing.exists():
+                prev = results_by_key.get(key, {})
+                results_by_key[key] = {
+                    "prompt_idx": prompt_idx,
+                    "sample_idx": sample_idx,
+                    "prompt_en": prompt_en,
+                    "refined_prompt": refined_prompt,
+                    "dimension": dimensions,
+                    "video_filename": resolved_existing.name,
+                    "video_path": str(resolved_existing),
+                    "seed": prev.get("seed"),
+                    "elapsed_time": prev.get("elapsed_time"),
+                    "status": "skipped_existing",
+                }
+                print(
+                    f"[Resume][Skip] prompt_idx={prompt_idx} sample_idx={sample_idx} existing={resolved_existing}",
+                    flush=True,
+                )
+                pbar.update(1)
+                continue
+
             if args_cmd.use_random_seed:
                 seed = random.randint(0, 2**31 - 1)
             else:
@@ -160,46 +258,49 @@ def main():
             data = {"seed": seed, "image_path": None, "prompt": infer_prompt}
             try:
                 output = perform_inference(pipe, data, args)
-                if args_cmd.filename_mode == "prompt":
-                    fname = prompt_video_basename(prompt_en, sample_idx)
-                else:
-                    fname = f"{prompt_idx:03d}-{sample_idx:02d}.mp4"
-                vpath = output_dir / fname
-                save_video(output["output"], fps=args.fps, save_filepath=str(vpath))
-                results.append(
-                    {
-                        "prompt_idx": prompt_idx,
-                        "sample_idx": sample_idx,
-                        "prompt_en": prompt_en,
-                        "refined_prompt": refined_prompt,
-                        "dimension": dimensions,
-                        "video_filename": fname,
-                        "video_path": str(vpath),
-                        "seed": seed,
-                        "elapsed_time": output.get("elapsed_time", None),
-                    }
+                print(
+                    f"[Save][Start] prompt_idx={prompt_idx} sample_idx={sample_idx} target={vpath}",
+                    flush=True,
                 )
+                actual_vpath = _save_and_verify_video(output["output"], fps=args.fps, requested_path=vpath)
+                results_by_key[key] = {
+                    "prompt_idx": prompt_idx,
+                    "sample_idx": sample_idx,
+                    "prompt_en": prompt_en,
+                    "refined_prompt": refined_prompt,
+                    "dimension": dimensions,
+                    "video_filename": actual_vpath.name,
+                    "video_path": str(actual_vpath),
+                    "seed": seed,
+                    "elapsed_time": output.get("elapsed_time", None),
+                    "status": "ok",
+                }
             except Exception as e:
-                results.append(
-                    {
-                        "prompt_idx": prompt_idx,
-                        "sample_idx": sample_idx,
-                        "prompt_en": prompt_en,
-                        "refined_prompt": refined_prompt,
-                        "dimension": dimensions,
-                        "video_path": None,
-                        "seed": seed,
-                        "error": str(e),
-                    }
+                print(
+                    f"[Save][ERROR] prompt_idx={prompt_idx} sample_idx={sample_idx} err={type(e).__name__}: {e}",
+                    flush=True,
                 )
+                print(traceback.format_exc(), flush=True)
+                results_by_key[key] = {
+                    "prompt_idx": prompt_idx,
+                    "sample_idx": sample_idx,
+                    "prompt_en": prompt_en,
+                    "refined_prompt": refined_prompt,
+                    "dimension": dimensions,
+                    "video_path": None,
+                    "seed": seed,
+                    "error": str(e),
+                    "status": "failed",
+                }
             pbar.update(1)
 
     pbar.close()
-    with open(output_dir / "metadata.json", "w") as f:
+    results = [results_by_key[k] for k in sorted(results_by_key.keys())]
+    with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     ok = len([r for r in results if r.get("video_path")])
     print(f"[Done] generated {ok}/{total} videos")
-    print(f"[Done] metadata: {output_dir / 'metadata.json'}")
+    print(f"[Done] metadata: {metadata_path}")
 
 
 if __name__ == "__main__":

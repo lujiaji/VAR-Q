@@ -115,7 +115,6 @@ class InferencePipe:
 
 
 def perform_inference(pipe, data, args, tracer=None):
-    
     prompt = data["prompt"]
     seed = data["seed"]
     mapped_duration=5
@@ -123,6 +122,18 @@ def perform_inference(pipe, data, args, tracer=None):
 
     # If an image_path is provided, perform image-to-video generation.
     image_path = data.get("image_path", None)
+    negative_prompt = data.get("negative_prompt", "")
+
+    if isinstance(prompt, str):
+        batch_size = int(data.get("batch_size", 1))
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+        prompt_list = [prompt] * batch_size
+    else:
+        prompt_list = list(prompt)
+        if not prompt_list:
+            raise ValueError("prompt list is empty")
+        batch_size = len(prompt_list)
 
     dynamic_resolution_h_w, h_div_w_templates = get_dynamic_resolution_meta(args.dynamic_scale_schedule, args.video_frames)
     h_div_w_template_ = h_div_w_templates[np.argmin(np.abs(h_div_w_templates-0.571))]
@@ -130,8 +141,8 @@ def perform_inference(pipe, data, args, tracer=None):
     args.first_full_spatial_size_scale_index = get_first_full_spatial_size_scale_index(scale_schedule)
     args.tower_split_index = args.first_full_spatial_size_scale_index + 1
     context_info = pipe.get_scale_pack_info(scale_schedule, args.first_full_spatial_size_scale_index, args)    
-    for si, info in context_info.items():
-        print(f"scale {si}: left_ref = {info['left_ref']}, right_ref = {info['right_ref']}")
+    # for si, info in context_info.items():
+    #     print(f"scale {si}: left_ref = {info['left_ref']}, right_ref = {info['right_ref']}")
     scale_schedule = dynamic_resolution_h_w[h_div_w_template_][args.pn]['pt2scale_schedule'][(num_frames-1)//4+1]
     tau = [args.tau_image] * args.tower_split_index + [args.tau_video] * (len(scale_schedule) - args.tower_split_index)
     tgt_h, tgt_w = scale_schedule[-1][1] * 16, scale_schedule[-1][2] * 16
@@ -146,11 +157,9 @@ def perform_inference(pipe, data, args, tracer=None):
         gt_leak=len(scale_schedule)//2
 
     generated_image_list = []
-    negative_prompt=''
-    prompt = f'{prompt}, Close-up on big objects, emphasize scale and detail'
-    negative_prompt = ""
+    prompt_list = [f'{item}, Close-up on big objects, emphasize scale and detail' for item in prompt_list]
     if args.append_duration2caption:
-        prompt = f'<<<t={mapped_duration}s>>>' + prompt
+        prompt_list = [f'<<<t={mapped_duration}s>>>{item}' for item in prompt_list]
     
     start_time = time.time()
     baseline_alloc_mb = reset_peak_and_get_baseline_alloc_mb()
@@ -160,7 +169,7 @@ def perform_inference(pipe, data, args, tracer=None):
             pipe.vae,
             pipe.text_tokenizer,
             pipe.text_encoder,
-            prompt,
+            prompt_list,
             negative_prompt=negative_prompt,
             g_seed=seed,
             gt_leak=gt_leak,

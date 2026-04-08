@@ -27,6 +27,14 @@ except ImportError:
     print("Warning: VAR_Q not found, quantization will be disabled")
     VAR_Q = None
 
+# Import SageAttn
+try:
+    from sageattention import sageattn
+    from sageattention import sageattn_qk_int8_pv_fp8_cuda
+except ImportError:
+    print("Warning: SageAttention not found, SageAttention will be disabled")
+    sageattn = None
+    sageattn_qk_int8_pv_fp8_cuda = None
 
 # ---------- Optional Q/K/V/O dump capture (offline MSE) ----------
 _QKVO_DUMP_CAPTURE = {
@@ -454,7 +462,7 @@ class SelfAttention(nn.Module):
             k = k.contiguous()      # bf16
             v = v.contiguous()      # bf16
         if rope2d_freqs_grid is not None:
-            if self.using_flash:
+            if self.using_flash or self.using_sageattn:
                 # apply_rotary_emb expects BHLc; convert BLHc -> BHLc, apply, convert back
                 q, k = q.transpose(1, 2), k.transpose(1, 2)
                 q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
@@ -552,8 +560,9 @@ class SelfAttention(nn.Module):
                 k_dump = k * self.cached_theta
             else:
                 k_dump = k * theta_cur
-        
-        if self.using_flash:
+        if self.using_sageattn:
+            oup = sageattn(q, k, v, tensor_layout="HND",is_causal=False)
+        elif self.using_flash:
             if attn_bias_or_two_vector is not None: # training
                 kw = dict(VAR_visible_kvlen=attn_bias_or_two_vector[0], VAR_invisible_qlen=attn_bias_or_two_vector[1])
             else:                                   # inference (autoregressive sampling)

@@ -9,7 +9,7 @@
     "qkv_format": "BHLc",
     "rescale_qk": false,
     "enable_fused_kv_flashattn": false,
-    "enable_sageattn": true,
+    "enable_sageattn": false,
     "sageattn_type": "sageattn"
   },
   "inference": {

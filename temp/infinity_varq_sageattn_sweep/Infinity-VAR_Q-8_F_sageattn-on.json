@@ -5,7 +5,7 @@
   "quantization": {
     "enable": true,
     "q_bits": 8,
-    "quant_method": "G_SCALE_HEAD_DIM",
+    "quant_method": "G_HEAD_DIM",
     "qkv_format": "BHLc",
     "rescale_qk": false,
     "enable_fused_kv_flashattn": false,

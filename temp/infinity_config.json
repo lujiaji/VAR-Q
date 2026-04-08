@@ -1,0 +1,17 @@
+{
+  "model": {
+    "model_type": "infinity_2b"
+  },
+  "inference": {
+    "device": "cuda",
+    "seed": 0,
+    "cfg": 3.0,
+    "tau": 0.5,
+    "h_div_w": 1.0,
+    "enable_positive_prompt": 0
+  },
+  "checkpoints": {
+    "vae_ckpt": "/data/boxunxu/Infinity/infinity_vae_d32reg.pth",
+    "model_path": "/data/boxunxu/Infinity/infinity_2b_reg.pth"
+  }
+}

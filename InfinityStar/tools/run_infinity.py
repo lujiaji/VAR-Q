@@ -59,8 +59,13 @@ def extract_key_val(text):
 def encode_prompt(t5_path, text_tokenizer, text_encoder, prompt, enable_positive_prompt=False, low_vram_mode=False):
     if enable_positive_prompt:
         pass
-    print(f'prompt={prompt}')
-    captions = [prompt]
+    if isinstance(prompt, str):
+        captions = [prompt]
+    else:
+        captions = list(prompt)
+    print(f'prompt_count={len(captions)}')
+    if len(captions) <= 4:
+        print(f'prompts={captions}')
     if 'flan-t5' in t5_path:
         tokens = text_tokenizer(text=captions, max_length=512, padding='max_length', truncation=True, return_tensors='pt')
         input_ids = tokens.input_ids.cuda(non_blocking=True)
@@ -125,9 +130,35 @@ def gen_one_example(
         cfg_list = [cfg_list] * len(scale_schedule)
     if not isinstance(tau_list, list):
         tau_list = [tau_list] * len(scale_schedule)
-    text_cond_tuple = encode_prompt(args.text_encoder_ckpt, text_tokenizer, text_encoder, prompt, enable_positive_prompt, low_vram_mode=low_vram_mode)
+    if isinstance(prompt, str):
+        prompt_list = [prompt]
+    else:
+        prompt_list = list(prompt)
+    if len(prompt_list) == 0:
+        raise ValueError("prompt list is empty")
+    batch_size = len(prompt_list)
+    text_cond_tuple = encode_prompt(
+        args.text_encoder_ckpt,
+        text_tokenizer,
+        text_encoder,
+        prompt_list,
+        enable_positive_prompt,
+        low_vram_mode=low_vram_mode,
+    )
     if negative_prompt:
-        negative_label_B_or_BLT = encode_prompt(args.text_encoder_ckpt, text_tokenizer, text_encoder, negative_prompt, low_vram_mode=low_vram_mode)
+        if isinstance(negative_prompt, str):
+            negative_list = [negative_prompt] * batch_size
+        else:
+            negative_list = list(negative_prompt)
+            if len(negative_list) != batch_size:
+                raise ValueError("negative_prompt list size must match prompt list size")
+        negative_label_B_or_BLT = encode_prompt(
+            args.text_encoder_ckpt,
+            text_tokenizer,
+            text_encoder,
+            negative_list,
+            low_vram_mode=low_vram_mode,
+        )
     else:
         negative_label_B_or_BLT = None
     print(f'cfg: {cfg_list}, tau: {tau_list}')
@@ -137,7 +168,7 @@ def gen_one_example(
             vae=vae,
             scale_schedule=scale_schedule,
             label_B_or_BLT=text_cond_tuple, g_seed=g_seed,
-            B=1, negative_label_B_or_BLT=negative_label_B_or_BLT, force_gt_Bhw=None,
+            B=batch_size, negative_label_B_or_BLT=negative_label_B_or_BLT, force_gt_Bhw=None,
             cfg_sc=cfg_sc, cfg_list=cfg_list, tau_list=tau_list, top_k=top_k, top_p=top_p,
             returns_vemb=1, ratio_Bl1=None, gumbel=gumbel, norm_cfg=False,
             cfg_exp_k=cfg_exp_k, cfg_insertion_layer=cfg_insertion_layer,
@@ -162,7 +193,21 @@ def gen_one_example(
             pred_multi_scale_bit_labels, img_list = out
             
     print(f"cost: {time.time() - sstt}, infinity cost={time.time() - stt}")
-    img = img_list[0]
+    if torch.is_tensor(img_list):
+        if batch_size == 1 and img_list.shape[0] == 1:
+            img = img_list[0]
+        else:
+            img = img_list
+    elif isinstance(img_list, (list, tuple)):
+        if batch_size == 1:
+            img = img_list[0]
+        else:
+            if all(torch.is_tensor(x) for x in img_list):
+                img = torch.stack(list(img_list), dim=0)
+            else:
+                img = np.stack([np.asarray(x) for x in img_list], axis=0)
+    else:
+        img = img_list
     return img, pred_multi_scale_bit_labels
 
 def get_prompt_id(prompt):

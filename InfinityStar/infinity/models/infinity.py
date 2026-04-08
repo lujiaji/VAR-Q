@@ -24,7 +24,13 @@ from torch.nn.attention.flex_attention import flex_attention
 
 import infinity.utils.dist as dist
 from infinity.utils.dist import for_visualize
-from infinity.models.basic import flash_fused_op_installed, SelfAttnBlock, FastRMSNorm
+from infinity.models.basic import (
+    flash_fused_op_installed,
+    SelfAttnBlock,
+    FastRMSNorm,
+    check_debug_tensor_finite,
+    check_debug_prob_tensor,
+)
 from infinity.models.rope import precompute_rope4d_freqs_grid
 from infinity.models.flex_attn_mask import build_flex_attn_func
 from infinity.schedules.dynamic_resolution import get_dynamic_resolution_meta, get_first_full_spatial_size_scale_index, get_activated_h_div_w_templates
@@ -49,17 +55,23 @@ class SharedAdaLin(nn.Linear):
 class MultipleLayers(nn.Module):
     def __init__(self, ls, num_blocks_in_a_chunk, index):
         super().__init__()
+        self.start_index = index
         self.module = nn.ModuleList()
         for i in range(index, index+num_blocks_in_a_chunk):
             self.module.append(ls[i])
 
     def forward(self, x, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn=None, scale_schedule=None, checkpointing_full_block=False, rope2d_freqs_grid=None, scale_ind=None, context_info=None, last_repetition_step=True, ref_text_scale_inds=[]):
         h = x
-        for m in self.module:
+        for local_idx, m in enumerate(self.module):
             if checkpointing_full_block:
                 h = torch.utils.checkpoint.checkpoint(m, h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, rope2d_freqs_grid, scale_schedule, scale_ind, context_info, last_repetition_step, ref_text_scale_inds, use_reentrant=False)
             else:
                 h = m(h, cond_BD, ca_kv, attn_bias_or_two_vector, attn_fn, rope2d_freqs_grid, scale_schedule, scale_ind, context_info, last_repetition_step, ref_text_scale_inds)
+            check_debug_tensor_finite(
+                "chunk_hidden_state",
+                h,
+                f"MultipleLayers block={self.start_index + local_idx} scale={scale_ind}",
+            )
         return h
 
 def get_timestep_embedding(dim, timesteps=1000, max_period=10000):
@@ -592,7 +604,6 @@ class Infinity(nn.Module):
                 lens = lens + lens_un
         kv_compact = self.text_norm(kv_compact)
         kv_compact = self.text_proj(kv_compact).contiguous()
-        assert B == 1
         prefix_tokens = torch.zeros((bs, text_maxlen_this_iter, self.C), dtype=kv_compact.dtype, device=kv_compact.device)
         total = 0
         for i, le in enumerate(lens):
@@ -682,12 +693,12 @@ class Infinity(nn.Module):
 
         noise_shape = vae_scale_schedule[0]
         if self.other_args.noise_input:
-            noise = torch.randn((1, self.vae_embed_dim, *noise_shape), dtype=prefix_tokens.dtype, device=prefix_tokens.device)
+            noise = torch.randn((B, self.vae_embed_dim, *noise_shape), dtype=prefix_tokens.dtype, device=prefix_tokens.device)
         else:
-            noise = torch.zeros((1, self.vae_embed_dim, *noise_shape), dtype=prefix_tokens.dtype, device=prefix_tokens.device)
-        
-        summed_codes = [noise[0:1]]
-        sos_token = self.embeds_codes2input(noise, bs//1)
+            noise = torch.zeros((B, self.vae_embed_dim, *noise_shape), dtype=prefix_tokens.dtype, device=prefix_tokens.device)
+
+        summed_codes = [noise]
+        sos_token = self.embeds_codes2input(noise, bs//B)
         # text tokens forward
         rope_cache = self.rope2d_freqs_grid['freqs_text'][:,:,:,:,:text_maxlen_this_iter]
         last_stage = prefix_tokens
@@ -697,6 +708,8 @@ class Infinity(nn.Module):
         _rec = self._enable_latency_recording()
         for block_idx, b in enumerate(block_chunks):
             last_stage = b(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_mask, attn_fn=None, scale_schedule=scale_schedule, rope2d_freqs_grid=rope_cache, scale_ind='t0', context_info=context_info, last_repetition_step=True)
+            if self.num_block_chunks == 1:
+                check_debug_tensor_finite("last_stage_text_prefill", last_stage, f"block={block_idx} scale=t0")
         self._disable_latency_recording()
         torch.cuda.synchronize()
         _text_t1 = time.perf_counter()
@@ -735,9 +748,16 @@ class Infinity(nn.Module):
                 _rec = self._enable_latency_recording()
                 for block_idx, b in enumerate(block_chunks):
                     last_stage = b(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_mask, attn_fn=None, scale_schedule=scale_schedule, rope2d_freqs_grid=rope_cache, scale_ind=si, context_info=context_info, last_repetition_step=last_repetition_step, ref_text_scale_inds=ref_text_scale_inds)
+                    if self.num_block_chunks == 1:
+                        check_debug_tensor_finite(
+                            "last_stage_decode",
+                            last_stage,
+                            f"block={block_idx} scale={si} repeat={repeat_idx}",
+                        )
                 self._disable_latency_recording()
                 self._record_runtime_mem_point("decode_step", scale_ind=si, repeat_idx=repeat_idx)
                 logits_BlV = self.get_logits_during_infer(last_stage, is_semantic_scale=rel_si_in_one_clip < args.semantic_scales).mul(1/tau_list[si])
+                check_debug_tensor_finite("logits_pre_guidance", logits_BlV, f"scale={si} repeat={repeat_idx} stage=pre_guidance")
                 if cfg != 1:
                     # print(f'add cfg on add_cfg_on_logits')
                     if args.use_cfg:
@@ -745,7 +765,10 @@ class Infinity(nn.Module):
                     elif args.use_apg:
                         pred_cond = logits_BlV[:B]
                         pred_uncond = logits_BlV[B:]
+                        check_debug_tensor_finite("pred_cond", pred_cond, f"scale={si} repeat={repeat_idx} stage=apg_cond")
+                        check_debug_tensor_finite("pred_uncond", pred_uncond, f"scale={si} repeat={repeat_idx} stage=apg_uncond")
                         pred_guided = normalized_guidance(pred_cond, pred_uncond, guidance_scale=cfg, momentum_buffer=None, eta=0, norm_threshold=args.apg_norm_threshold)
+                        check_debug_tensor_finite("pred_guided", pred_guided, f"scale={si} repeat={repeat_idx} stage=apg_guided")
                         # pred_guided = cfg * pred_cond + (1-cfg) * pred_uncond
                         logits_BlV = pred_guided
                 else:
@@ -753,7 +776,9 @@ class Infinity(nn.Module):
                 
                 tmp_bs, tmp_seq_len = logits_BlV.shape[:2]
                 logits_BlV = logits_BlV.reshape(tmp_bs, -1, self.num_of_label_value)
+                check_debug_tensor_finite("logits_reshaped", logits_BlV, f"scale={si} repeat={repeat_idx} stage=reshaped")
                 probs_Bld = logits_BlV.softmax(dim=-1) # [B, thwd or thw4d, 2]
+                check_debug_prob_tensor("probs_Bld", probs_Bld, f"scale={si} repeat={repeat_idx} stage=softmax")
                 idx_Bld = torch.multinomial(probs_Bld.view(-1, self.num_of_label_value), num_samples=1, replacement=True, generator=rng).view(tmp_bs, -1) # [B, thwd or thw4d]
                 probs_Bld = torch.gather(probs_Bld, dim=2, index=idx_Bld.unsqueeze(-1)).squeeze(-1)
 
@@ -890,17 +915,19 @@ class Infinity(nn.Module):
 
         noise_shape = vae_scale_schedule[0]
         if self.other_args.noise_input:
-            noise = torch.randn((1, self.vae_embed_dim, *noise_shape), dtype=prefix_tokens.dtype, device=prefix_tokens.device)
+            noise = torch.randn((B, self.vae_embed_dim, *noise_shape), dtype=prefix_tokens.dtype, device=prefix_tokens.device)
         else:
-            noise = torch.zeros((1, self.vae_embed_dim, *noise_shape), dtype=prefix_tokens.dtype, device=prefix_tokens.device)
-        
-        summed_codes = [noise[0:1]]
-        sos_token = self.embeds_codes2input(noise, bs//1)
+            noise = torch.zeros((B, self.vae_embed_dim, *noise_shape), dtype=prefix_tokens.dtype, device=prefix_tokens.device)
+
+        summed_codes = [noise]
+        sos_token = self.embeds_codes2input(noise, bs//B)
         # text tokens forward
         rope_cache = self.rope2d_freqs_grid['freqs_text'][:,:,:,:,:text_maxlen_this_iter]
         last_stage = prefix_tokens
         for block_idx, b in enumerate(block_chunks):
             last_stage = b(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_mask, attn_fn=None, scale_schedule=scale_schedule, rope2d_freqs_grid=rope_cache, scale_ind=f't0', context_info=context_info, last_repetition_step=True)
+            if self.num_block_chunks == 1:
+                check_debug_tensor_finite("last_stage_text_prefill", last_stage, f"block={block_idx} scale=t0")
         pbar.update(1)
 
         ref_text_scale_inds = ['t0']
@@ -914,6 +941,8 @@ class Infinity(nn.Module):
             last_stage = self.embeds_codes2input(last_stage, bs//B)
             for block_idx, b in enumerate(block_chunks):
                 last_stage = b(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_mask, attn_fn=None, scale_schedule=scale_schedule, rope2d_freqs_grid=rope_cache, scale_ind=f'semantic_condition', context_info=context_info, last_repetition_step=True)
+                if self.num_block_chunks == 1:
+                    check_debug_tensor_finite("semantic_condition_hidden", last_stage, f"block={block_idx} scale=semantic_condition")
             pbar.update(1)
 
             last_stage = torch.cat([first_frame_features, former_clip_features[:,:,detail_frame_inds]], dim=2)
@@ -921,6 +950,8 @@ class Infinity(nn.Module):
             last_stage = self.embeds_codes2input(last_stage, bs//B)
             for block_idx, b in enumerate(block_chunks):
                 last_stage = b(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_mask, attn_fn=None, scale_schedule=scale_schedule, rope2d_freqs_grid=rope_cache, scale_ind=f'detail_condition', context_info=context_info, last_repetition_step=True)
+                if self.num_block_chunks == 1:
+                    check_debug_tensor_finite("detail_condition_hidden", last_stage, f"block={block_idx} scale=detail_condition")
             pbar.update(1)
 
             ref_text_scale_inds.extend(['semantic_condition', 'detail_condition'])
@@ -944,7 +975,10 @@ class Infinity(nn.Module):
                 last_repetition_step = (repeat_idx == (infer_repeat_times-1))
                 for block_idx, b in enumerate(block_chunks):
                     last_stage = b(x=last_stage, cond_BD=cond_BD_or_gss, ca_kv=ca_kv, attn_bias_or_two_vector=attn_mask, attn_fn=None, scale_schedule=scale_schedule, rope2d_freqs_grid=rope_cache, scale_ind=si, context_info=context_info, last_repetition_step=last_repetition_step, ref_text_scale_inds=ref_text_scale_inds)
+                    if self.num_block_chunks == 1:
+                        check_debug_tensor_finite("last_stage_decode", last_stage, f"block={block_idx} scale={si} repeat={repeat_idx}")
                 logits_BlV = self.get_logits_during_infer(last_stage, is_semantic_scale=rel_si_in_one_clip < args.semantic_scales).mul(1/tau_list[si])
+                check_debug_tensor_finite("logits_pre_guidance", logits_BlV, f"scale={si} repeat={repeat_idx} stage=pre_guidance")
                 if cfg != 1:
                     # print(f'add cfg on add_cfg_on_logits')
                     if args.use_cfg:
@@ -952,7 +986,10 @@ class Infinity(nn.Module):
                     elif args.use_apg:
                         pred_cond = logits_BlV[:B]
                         pred_uncond = logits_BlV[B:]
+                        check_debug_tensor_finite("pred_cond", pred_cond, f"scale={si} repeat={repeat_idx} stage=apg_cond")
+                        check_debug_tensor_finite("pred_uncond", pred_uncond, f"scale={si} repeat={repeat_idx} stage=apg_uncond")
                         pred_guided = normalized_guidance(pred_cond, pred_uncond, guidance_scale=cfg, momentum_buffer=None, eta=0, norm_threshold=args.apg_norm_threshold)
+                        check_debug_tensor_finite("pred_guided", pred_guided, f"scale={si} repeat={repeat_idx} stage=apg_guided")
                         # pred_guided = cfg * pred_cond + (1-cfg) * pred_uncond
                         logits_BlV = pred_guided
                 else:
@@ -960,7 +997,9 @@ class Infinity(nn.Module):
                 
                 tmp_bs, tmp_seq_len = logits_BlV.shape[:2]
                 logits_BlV = logits_BlV.reshape(tmp_bs, -1, self.num_of_label_value)
+                check_debug_tensor_finite("logits_reshaped", logits_BlV, f"scale={si} repeat={repeat_idx} stage=reshaped")
                 probs_Bld = logits_BlV.softmax(dim=-1) # [B, thwd or thw4d, 2]
+                check_debug_prob_tensor("probs_Bld", probs_Bld, f"scale={si} repeat={repeat_idx} stage=softmax")
                 idx_Bld = torch.multinomial(probs_Bld.view(-1, self.num_of_label_value), num_samples=1, replacement=True, generator=rng).view(tmp_bs, -1) # [B, thwd or thw4d]
                 probs_Bld = torch.gather(probs_Bld, dim=2, index=idx_Bld.unsqueeze(-1)).squeeze(-1)
 

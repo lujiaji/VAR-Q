@@ -50,6 +50,53 @@ except ImportError:
         return (x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True).add_(epsilon))) * weight
 
 
+_NUMERICS_DEBUG = os.environ.get("INFINITYSTAR_NUMERICS_DEBUG", "0") == "1"
+
+
+def _format_debug_tensor_stats(tensor: torch.Tensor) -> str:
+    t = tensor.detach().float()
+    nan_count = int(torch.isnan(t).sum().item())
+    inf_count = int(torch.isinf(t).sum().item())
+    finite_mask = torch.isfinite(t)
+    if bool(finite_mask.any()):
+        finite_vals = t[finite_mask]
+        min_val = float(finite_vals.min().item())
+        max_val = float(finite_vals.max().item())
+        absmax_val = float(finite_vals.abs().max().item())
+    else:
+        min_val = float("nan")
+        max_val = float("nan")
+        absmax_val = float("nan")
+    return (
+        f"shape={tuple(tensor.shape)} dtype={tensor.dtype} device={tensor.device} "
+        f"nan={nan_count} inf={inf_count} min={min_val:.6g} max={max_val:.6g} absmax={absmax_val:.6g}"
+    )
+
+
+def check_debug_tensor_finite(name: str, tensor: Optional[torch.Tensor], context: str) -> None:
+    if not _NUMERICS_DEBUG or tensor is None or not torch.is_tensor(tensor) or not tensor.is_floating_point():
+        return
+    if bool(torch.isfinite(tensor).all()):
+        return
+    msg = f"[INFINITYSTAR_NUMERICS] non-finite tensor `{name}` at {context}: {_format_debug_tensor_stats(tensor)}"
+    print(msg, flush=True)
+    raise RuntimeError(msg)
+
+
+def check_debug_prob_tensor(name: str, tensor: Optional[torch.Tensor], context: str) -> None:
+    if not _NUMERICS_DEBUG or tensor is None or not torch.is_tensor(tensor) or not tensor.is_floating_point():
+        return
+    check_debug_tensor_finite(name, tensor, context)
+    min_val = float(tensor.detach().float().min().item())
+    if min_val < 0:
+        msg = (
+            f"[INFINITYSTAR_NUMERICS] invalid probability tensor `{name}` at {context}: "
+            f"min={min_val:.6g}, {_format_debug_tensor_stats(tensor)}"
+        )
+        print(msg, flush=True)
+        raise RuntimeError(msg)
+
+
 class FastRMSNorm(nn.Module):
     def __init__(self, C, eps=1e-6, elementwise_affine=True):
         super().__init__()
@@ -205,22 +252,22 @@ class SelfAttention(nn.Module):
         if self.using_sageattn:
             if self.sageattn_type == 'sageattn_qk_int8_pv_fp8_cuda':
                 self._sageattn_impl = sageattn_qk_int8_pv_fp8_cuda
-                print("using sageattn_qk_int8_pv_fp8_cuda")
+                # print("using sageattn_qk_int8_pv_fp8_cuda")
             elif self.sageattn_type == 'sageattn':
                 self._sageattn_impl = sageattn
-                print("using sageattn")
+                # print("using sageattn")
             elif self.sageattn_type == 'sageattn_qk_int8_pv_fp16_triton':
                 self._sageattn_impl = sageattn_qk_int8_pv_fp16_triton
-                print("using sageattn_qk_int8_pv_fp16_triton")
+                # print("using sageattn_qk_int8_pv_fp16_triton")
             elif self.sageattn_type == 'sageattn_qk_int8_pv_fp16_cuda':
                 self._sageattn_impl = sageattn_qk_int8_pv_fp16_cuda
-                print("using sageattn_qk_int8_pv_fp16_cuda")
+                # print("using sageattn_qk_int8_pv_fp16_cuda")
             elif self.sageattn_type == 'sageattn_qk_int8_pv_fp8_cuda_sm90':
                 self._sageattn_impl = sageattn_qk_int8_pv_fp8_cuda_sm90
-                print("using sageattn_qk_int8_pv_fp8_cuda_sm90")
+                # print("using sageattn_qk_int8_pv_fp8_cuda_sm90")
             elif self.sageattn_type == 'sageattn_varlen':
                 self._sageattn_impl = sageattn_varlen
-                print("using sageattn_varlen")
+                # print("using sageattn_varlen")
             else:
                 raise ValueError(f"Unsupported sageattn_type: {self.sageattn_type}")
             if self._sageattn_impl is None:
@@ -415,6 +462,14 @@ class SelfAttention(nn.Module):
             if self.use_flex_attn and attn_fn is not None:
                 attn_output = attn_fn(query_states.to(value_states.dtype), key_states.to(value_states.dtype), value_states, scale=scale).transpose(1, 2).reshape(B, L, C)
             else:
+                _attn_ctx = (
+                    f"SelfAttention block={self.debug_block_id} scale={scale_ind} "
+                    f"B={B} L={L} sage={int(self.using_sageattn)} q_bits={self.q_bits} "
+                    f"quant={int(self.enable_quantization)}"
+                )
+                check_debug_tensor_finite("query_states_pre_attn", query_states, _attn_ctx)
+                check_debug_tensor_finite("key_states_pre_attn", key_states, _attn_ctx)
+                check_debug_tensor_finite("value_states_pre_attn", value_states, _attn_ctx)
                 # Prefer fused int4 KV path only for strict Phase-1 constraints; otherwise fallback to baseline.
                 use_fused_int4 = (
                     self.enable_fused_kv_flashattn
@@ -474,6 +529,7 @@ class SelfAttention(nn.Module):
                             is_causal=False,
                             sm_scale=scale,
                         ).transpose(1, 2).reshape(B, L, C)
+                        check_debug_tensor_finite("sageattn_output", attn_output, _attn_ctx)
                     else:
                         attn_output = flash_attn_func(
                             query_states.permute([0, 2, 1, 3]).to(torch.bfloat16),
@@ -482,6 +538,7 @@ class SelfAttention(nn.Module):
                             softmax_scale=scale,
                         )
                         attn_output = attn_output.reshape(B, L, C)
+                        check_debug_tensor_finite("flashattn_output", attn_output, _attn_ctx)
 
                 # fa3, flash_attn_func input/output should be (batch_size, seqlen, nheads, headdim)
                 # from flash_attn_interface import flash_attn_qkvpacked_func, flash_attn_func
@@ -497,6 +554,7 @@ class SelfAttention(nn.Module):
                 attn_output = sp_all_to_all(attn_output, sdim, gdim)
 
             attn_output = self.o_proj(attn_output)
+            check_debug_tensor_finite("attn_output_after_o_proj", attn_output, _attn_ctx)
 
             return attn_output
         

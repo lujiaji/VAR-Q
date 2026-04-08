@@ -3,14 +3,12 @@
     "model_type": "infinity_8b"
   },
   "quantization": {
-    "enable": true,
+    "enable": false,
     "q_bits": 8,
     "quant_method": "G_SCALE_HEAD_DIM",
     "qkv_format": "BHLc",
     "rescale_qk": false,
-    "enable_fused_kv_flashattn": false,
-    "enable_sageattn": true,
-    "sageattn_type": "sageattn"
+    "enable_fused_kv_flashattn": false
   },
   "inference": {
     "device": "cuda",
@@ -21,12 +19,12 @@
     "enable_positivee_prompt": 0
   },
   "batch_processing": {
-    "total_iters": 1000,
-    "batch_size": 50
+    "total_iters": 1,
+    "batch_size": 1
   },
   "checkpoints": {
-    "vae_ckpt": "YOUR_PATH/infinity_vae_d56_f8_14_patchify.pth",
-    "model_path": "YOUR_PATH/infinity_8b_weights",
+    "vae_ckpt": "/data/jiaji_lu/Infinity/infinity_vae_d56_f8_14_patchify.pth",
+    "model_path": "/data/jiaji_lu/Infinity/infinity_8b_weights",
     "model_url": "https://weights.replicate.delivery/default/FoundationVision/Infinity/model_cache.tar"
   }
 }

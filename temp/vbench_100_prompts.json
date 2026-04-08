@@ -1,0 +1,827 @@
+[
+  {
+    "prompt_en": "In a still frame, a stop sign",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, a stop sign stands prominently against a clear blue sky backdrop. The octagonal red sign with bold white letters is positioned slightly off-center, drawing attention with its vivid color. Sunlight casts a soft shadow across the sign’s surface, emphasizing its edges and creating a subtly dramatic effect. The scene is calm, with no visible movement, and the simplicity of the sign against the expansive sky highlights its importance and message. The camera captures the scene from a slightly low angle, adding depth and perspective to the composition."
+  },
+  {
+    "prompt_en": "a toilet, frozen in time",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A close-up view of a toilet frozen in time, capturing water defying gravity as it simulates mid-flush, forming splashes in mid-air. The toilet, with a gleaming white porcelain surface, is illuminated by bright, overhead lighting, creating a stark contrast with the water droplets. The camera slowly circles the scene, offering a dynamic perspective of the suspended motion. The play of light on the droplets creates a sparkling effect, highlighting the stillness of the moment despite the dynamic action typically associated with flushing."
+  },
+  {
+    "prompt_en": "a laptop, frozen in time",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A sleek, modern laptop is seen frozen in time on a minimalist desk. The screen displays a paused vibrant image of a cityscape at night, with colorful lights illuminating the scene. The laptop's lid is open at a typical viewing angle, and the keyboard glows softly with backlighting. The trackpad is centered below the keyboard, and the device's surface reflects a bit of ambient light. A subtle play of shadows and lights enhances the scene, capturing the stillness of the moment. The camera gently circles around the laptop, showcasing its elegance from different angles."
+  },
+  {
+    "prompt_en": "A tranquil tableau of alley",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A narrow, cobblestone alleyway is depicted, nestled between tall, old stone buildings. The alley is bathed in gentle, warm sunlight filtering through, casting soft shadows that add depth to the scene. The buildings are adorned with small, ornate wrought-iron balconies and flower boxes that overflow with vibrant blooms. At the end of the alley, a lush vine climbs the wall, adding greenery to the serene setting. The camera pans slowly from the ground up, capturing the textured stones and the charming architectural details, enhancing the peaceful and picturesque atmosphere."
+  },
+  {
+    "prompt_en": "A tranquil tableau of bar",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a tranquil tableau of a stylish bar, featuring dim, ambient lighting and a warm, inviting atmosphere. Behind the bar, an elegant display of bottles glistens reflectively under the soft overhead lights. A row of bar stools with plush cushioning stands in front of the counter, adding to the cozy environment. The bartender, a handsome man with neatly styled hair and a crisp white shirt, is seen polishing a glass while offering a welcoming smile. The camera gently pans across the bar, highlighting the sophisticated setting and capturing the serene vibe of this refined space."
+  },
+  {
+    "prompt_en": "A tranquil tableau of barn",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a tranquil tableau of a weathered wooden barn nestled in a serene rural landscape. The barn is surrounded by lush green grass, with a few scattered wildflowers adding a touch of color. The soft, warm light of the afternoon sun casts gentle shadows on the barn's rustic exterior, highlighting its aged wood and giving it a charming, timeless appearance. The camera slowly pans from left to right, offering a full view of the barn and its peaceful surroundings, enhancing the calm and idyllic atmosphere of the scene."
+  },
+  {
+    "prompt_en": "A tranquil tableau of bathroom",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a serene bathroom with a freestanding white bathtub as the focal point. Sunlight filters through a nearby window, casting gentle, warm patterns across the tiled floor. Soft, fluffy towels hang neatly on a rack beside the tub. A potted green plant adds a touch of nature and freshness. The atmosphere is calm and peaceful. The camera pans slowly, giving a complete view of the elegantly arranged bathroom, enhancing the sense of tranquility."
+  },
+  {
+    "prompt_en": "A tranquil tableau of bedroom",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The video captures a serene bedroom setting bathed in soft, natural light streaming through a window. A neatly made bed with crisp white sheets and plush pillows is at the center of the frame. Beside the bed is a small wooden nightstand with a lit lamp that emits a warm glow, casting gentle shadows. The walls are painted in a soothing pastel color, enhancing the room's calming atmosphere. A cozy armchair sits by the window, inviting relaxation. The camera slowly pans across the room, emphasizing its peaceful and inviting ambiance."
+  },
+  {
+    "prompt_en": "A tranquil tableau of cliff",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a tranquil tableau of a towering cliff overlooking the vast ocean below. The cliff's rugged surface is bathed in the golden light of the setting sun, highlighting its craggy texture and natural beauty. The deep blue ocean contrasts with the vivid colors of the sunset sky, creating a serene and picturesque atmosphere. The camera gently pans across the cliffside, providing a sweeping view of the majestic landscape and the tranquil waters stretching into the horizon."
+  },
+  {
+    "prompt_en": "In a still frame, courtyard",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, a charming courtyard is captured, bathed in the soft afternoon light. The courtyard is surrounded by rustic stone walls adorned with climbing ivy and vibrant flowering plants. In the center, there is a quaint stone fountain with water gently cascading down its tiers. Potted plants with colorful blooms are neatly arranged along the edges, adding lively bursts of color. A wrought iron table and chairs are set to one side, inviting relaxation and conversation. The scene exudes a peaceful, serene ambiance with a touch of elegance and natural beauty."
+  },
+  {
+    "prompt_en": "In a still frame, gas station",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, a gas station scene is depicted under the bright midday sun. The gas station has multiple fuel pumps, each equipped with digital screens and colorful hoses. A sleek, modern car is parked at one of the pumps, facing away from the camera. The station's main building, with its large windows and a red canopy, is visible in the background. The surrounding area is clear, showcasing a clean and well-maintained environment with clear skies above."
+  },
+  {
+    "prompt_en": "A tranquil tableau of house",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene depicts a tranquil tableau of a charming house nestled amidst lush greenery. The house is styled with a warm, rustic design, featuring a sloped roof and weathered wooden siding that adds to its cozy appearance. Soft sunlight filters through the surrounding trees, casting dappled shadows on the exterior walls and the ground below. A quaint porch with a few potted plants completes the inviting atmosphere. The camera gently pans from left to right, showcasing the serene setting and emphasizing the peaceful ambiance of the home."
+  },
+  {
+    "prompt_en": "indoor gymnasium, frozen in time",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In an indoor gymnasium frozen in time, a group of athletes is captured mid-motion. A young man is suspended in mid-air, his body twisted and eyes focused as if going for a slam dunk. He is wearing a sleeveless shirt and athletic shorts, with every muscle and sinew on display. Around him, other athletes are similarly frozen, a woman poised to catch a basketball and another person crouched with a focused gaze, ready to jump. Bright overhead lighting illuminates the glossy wooden floor and the sports equipment scattered around, creating a dynamic yet still scene. The camera is slowly circling around the center, emphasizing the stillness of the moment."
+  },
+  {
+    "prompt_en": "A tranquil tableau of indoor library",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The camera pans gently across a tranquil indoor library, showcasing tall wooden bookshelves filled with an array of books. Soft, warm lighting bathes the room, creating a cozy and inviting atmosphere. The polished wooden tables are neatly arranged with comfortable chairs, some of which have books and a few reading lamps. The camera smoothly transitions to focus on a large window that allows soft daylight to filter into the space, illuminating the peaceful setting."
+  },
+  {
+    "prompt_en": "A tranquil tableau of kitchen",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene presents a tranquil tableau of a kitchen bathed in soft, natural light filtering through a nearby window. The kitchen features neatly organized countertops, with a wooden bowl filled with fresh, colorful fruits like oranges and apples. A vase with a small bouquet of flowers adds a touch of charm to the setting. In the background, a stainless steel kettle sits on the stove, and a set of matching utensils hangs above it. The subtle tones and serene atmosphere create a peaceful and inviting space. The camera slowly pans across the scene, capturing the harmonious arrangement."
+  },
+  {
+    "prompt_en": "A tranquil tableau of palace",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The camera slowly approaches a grand and ornate palace, capturing its majestic architecture bathed in the golden light of the setting sun. The palace features intricately designed facades and towering spires that reach towards the sky. Surrounding the palace are beautifully manicured gardens, with lush greenery and colorful flowers adding to the tranquil scene. The atmosphere is serene and peaceful, with soft shadows enhancing the grandeur of the building. The camera gently pans to the side, offering a broader view of the palace and its picturesque surroundings."
+  },
+  {
+    "prompt_en": "In a still frame, parking lot",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, a parking lot is depicted with several parked cars arranged in neat rows. The scene is illuminated by overhead lights, casting a bright and even glow across the area, highlighting the various colors of the cars. Painted lines on the asphalt define each parking space, and a small tree can be seen at the edge of the lot, providing a touch of greenery. The atmosphere is orderly and calm, with a clear sky above, enhancing the overall visibility of the scene."
+  },
+  {
+    "prompt_en": "In a still frame, phone booth",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, a traditional red phone booth stands prominently in an urban setting. The booth, with its classic glass panels and iconic design, is positioned slightly to the left of the frame. The metal handle and keypad are visible through the glass, and the interior is well-lit, which highlights the details inside. The background consists of a blurred street scene with indistinct figures and buildings, giving the impression of a busy city environment while keeping the focus on the phone booth."
+  },
+  {
+    "prompt_en": "A tranquil tableau of restaurant",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A serene scene unfolds in a cozy restaurant, where soft ambient lighting creates a warm and inviting atmosphere. The tables are elegantly set with white tablecloths and neatly arranged silverware, accompanied by small vases of fresh flowers. A single table is captured in focus, featuring a flickering candle that adds to the tranquil mood. The background reveals hints of gentle chatter and the subtle clinking of glasses, enhancing the peaceful setting. The camera gently pans across the room, showcasing the harmonious layout and calming environment."
+  },
+  {
+    "prompt_en": "A tranquil tableau of tower",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In the distance, a majestic tower stands tall against the backdrop of a golden sunset. The tower's intricate architectural details are subtly highlighted by the warm light of the setting sun. The sky is awash with hues of orange and pink, casting a serene atmosphere over the scene. The camera slowly pans upward from the base to the top of the tower, capturing the elegance and grandeur of the structure as it is silhouetted against the colorful sky. Sparse clouds drift lazily, adding to the tranquil and picturesque setting."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a bowl",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A tranquil tableau showcases a ceramic bowl resting on a rustic wooden table. The bowl, finished in a soft pastel blue, is filled with fresh, ripe strawberries that are vividly red and glistening in the gentle ambient light. A few stray leaves are scattered around the strawberries, adding a touch of greenery to the composition. The scene is illuminated with soft, natural light, creating a warm and serene atmosphere. The camera slowly zooms in, highlighting the textures and colors of the strawberries and the bowl's glaze."
+  },
+  {
+    "prompt_en": "A tranquil tableau of an apple",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A single, perfectly ripe apple sits atop a wooden table, bathed in soft, warm light that highlights its glossy red skin. The apple is positioned slightly to the left, showcasing its round shape and delicate stem. The table's wooden texture complements the apple's vivid color, and a gentle shadow falls to the right, enhancing the serene and peaceful atmosphere. The camera slowly zooms in, bringing the apple's details into sharper focus and capturing its inviting appearance."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a bench",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A tranquil scene features a wooden bench positioned in a serene garden setting. The bench is surrounded by lush greenery and vibrant flowers, creating a peaceful atmosphere. Sunlight filters through the leaves of nearby trees, casting dappled shadows across the bench. The camera slowly pans from left to right, capturing the intricate details of the old, weathered wood and the colorful blossoms that dot the landscape. The gentle rustling of leaves and a soft breeze enhance the sense of calm and tranquility."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a bed",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A peaceful scene depicts a neatly made bed in a softly lit room, with natural light gently streaming in through a nearby window. The bed is adorned with crisp white sheets and a thick, plush comforter, creating an inviting and cozy atmosphere. A pair of fluffy pillows rest against the headboard, slightly angled to catch the light. The camera slowly pans from the head to the foot of the bed, capturing the serene and orderly arrangement, and emphasizing the tranquility of the setting."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a chair",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A single chair is placed in a serene setting, surrounded by the soft glow of warm light filtering through a nearby window. The chair, made of dark wood with a cushioned seat, is positioned invitingly, facing partially towards the camera. The atmosphere is calm and peaceful, enhanced by the gentle shadows that fall across the floor, creating an inviting and contemplative scene. The camera slowly pans from left to right, capturing the tranquil setting and the chair’s elegant design."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a cup",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A serene scene focuses on a white ceramic cup resting on a wooden table. The cup is filled with steaming hot tea, and delicate wisps of steam gently rise, swirling into the air. Soft, natural lighting bathes the scene, casting warm tones over the wooden surface and highlighting the cup's smooth, glossy finish. The atmosphere is peaceful and calming, with a potted green plant visible in the softly blurred background enhancing the tranquility. The camera moves slowly around the cup, capturing different angles and the steam's graceful ascent."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a dining table",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a tranquil tableau of a beautifully arranged dining table, bathed in soft, ambient lighting that gives the setting a warm and inviting feel. The table is elegantly set with a crisp, white tablecloth and adorned with fine china plates, polished silverware, and crystal glassware. A centerpiece composed of fresh, vibrant flowers adds a touch of color, enhancing the serene atmosphere. The camera gently pans across the table, highlighting the meticulous arrangement and detail, capturing the calmness and grace of the setting."
+  },
+  {
+    "prompt_en": "In a still frame, a pear",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, a ripe pear rests on a wooden surface. The pear's skin is a vibrant blend of green and yellow, with a few small brown speckles adding texture. Soft, natural light illuminates the pear from one side, casting a gentle shadow to the other side on the wood. The setting suggests a cozy, rustic atmosphere, evoking a sense of freshness and simplicity."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a bunch of grapes",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A tranquil tableau features a bunch of grapes resting elegantly on a simple white surface. The grapes are a rich, deep purple, with a few leaves scattered around them, adding a touch of green. Soft, diffused lighting creates gentle highlights on the grapes, emphasizing their plump and juicy appearance. The camera slowly pans across the grapes, capturing their velvety texture and the subtle sheen on their skin, evoking a serene and peaceful atmosphere."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a bowl on the kitchen counter",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A serene kitchen scene features a bowl resting on a clean, polished counter. The bowl is crafted from smooth, white ceramic with a slightly glossy finish, and is filled with an assortment of fresh, colorful fruits including vibrant red apples, bright yellow bananas, and deep purple grapes. The soft, natural light streaming in through a nearby window casts gentle shadows on the counter, adding to the tranquil atmosphere. The camera slowly pans to the right, capturing a glimpse of neatly arranged kitchen utensils and an inviting view of the outside garden through the window."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a beautiful, handcrafted ceramic bowl",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The video showcases a stunning, handcrafted ceramic bowl, beautifully displayed on a wooden table. The bowl features intricate patterns and delicate detailing, highlighting the artisan's skill. The camera slowly circles the bowl, capturing its graceful curves and the richness of its glazed finish. Soft, ambient light illuminates the scene, creating a warm and inviting atmosphere. As the camera completes its gentle rotation, the bowl's exquisite craftsmanship and unique design are fully revealed."
+  },
+  {
+    "prompt_en": "A tranquil tableau of an antique bowl",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A camera gently pans over a tranquil tableau featuring an antique bowl, set upon a rich, wooden surface. The bowl, with intricate patterns and an aged patina, is beautifully illuminated by soft, warm lighting, accentuating its timeless beauty. The surrounding atmosphere is calm and serene, with hints of vintage decor in the background, enhancing the antique charm of the scene. The camera movement is slow and smooth, capturing the elegant and detailed craftsmanship of the bowl."
+  },
+  {
+    "prompt_en": "A tranquil tableau of an exquisite mahogany dining table",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A beautifully crafted mahogany dining table stands in the center of the room, its rich, dark wood polished to a high sheen. Soft, warm lighting from an overhead chandelier bathes the table, enhancing the deep, luxurious tones of the wood. The table is set for a meal, adorned with elegant, white porcelain dinnerware and sparkling crystal glassware. A lush floral centerpiece with vibrant blossoms sits in the middle of the table, adding a touch of freshness and color. The camera gently circles the scene, capturing the tranquil elegance of the setting."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a wooden bench in the park",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The video showcases a serene scene of a wooden bench situated in a lush park. The bench, crafted from rich, dark wood, is placed in a peaceful corner surrounded by vibrant greenery. The soft sunlight filters through the leaves of nearby trees, creating dappled patterns on the bench and the grass. A gentle breeze rustles the leaves, adding to the tranquil atmosphere. The camera smoothly glides around the bench, capturing its details and the serenity of the natural setting."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a beautiful wrought-iron bench surrounded by blooming flowers",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The camera captures a stationary view of a charming wrought-iron bench nestled among vibrant blooms in a garden setting. Blossoming flowers of various colors, including reds, pinks, and yellows, surround the bench, creating a picturesque and serene atmosphere. Sunlight filters through the foliage, casting dappled patterns on the bench. The intricate design of the wrought-iron bench stands out against the lush greenery, inviting a sense of calm and relaxation. The gentle swaying of the flowers in the breeze adds a subtle motion to this tranquil scene."
+  },
+  {
+    "prompt_en": "In a still frame, a park bench with a view of the lake",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, a wooden park bench with ornate metal arms is centrally positioned, offering a picturesque view of the lake. The bench is slightly weathered, adding a rustic charm. Behind it, the lake spans out, shimmering under the sunlight with gentle ripples on its surface. Surrounding the bench, lush green grass and a few scattered wildflowers contribute to a serene and peaceful atmosphere. In the distance, trees line the far edge of the lake, providing a natural frame for the tranquil setting. The camera is positioned at a low angle, emphasizing the bench as it faces the inviting vista of the lake."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a vintage rocking chair was placed on the porch",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A vintage wooden rocking chair with ornate carvings sits peacefully on a wooden porch. The porch is adorned with potted plants that add a touch of greenery to the scene. Sunlight filters through, casting gentle shadows across the wooden floorboards. The rocking chair is angled slightly to face away from the camera, allowing a view of its beautiful craftsmanship. The atmosphere is serene, evoking a feeling of warmth and nostalgia. The camera slowly pans from left to right, showcasing the tranquil setting."
+  },
+  {
+    "prompt_en": "A tranquil tableau of the jail cell was small and dimly lit, with cold, steel bars",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a tranquil tableau of a small jail cell, dimly lit with a soft, moody atmosphere. The cold, steel bars at the front of the cell form a stark grid pattern, casting shadows on the cell's floor. Inside, the bare walls and simple furnishings, such as a narrow bed and a small table, contribute to the austere environment. The lighting creates a play of light and shadow, emphasizing the isolation and stillness within the cell. The camera slowly pans across the scene, highlighting the details and textures of the space."
+  },
+  {
+    "prompt_en": "A tranquil tableau of the phone booth was tucked away in a quiet alley",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A serene scene unfolds with a classic red phone booth nestled in a quiet alley. The alley is narrow and lined with cobblestones, creating a charming, old-world atmosphere. Ambient light softly illuminates the phone booth, highlighting its glossy paint and the glass panels. The surrounding walls are covered in ivy, adding a touch of greenery to the tranquil setting. The camera gently circles the booth, capturing the peaceful and nostalgic feel of this secluded location."
+  },
+  {
+    "prompt_en": "a dilapidated phone booth stood as a relic of a bygone era on the sidewalk, frozen in time",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A dilapidated phone booth, with its rusted frame and chipped glass panels, stands on the sidewalk as a relic of a bygone era. The booth's faded red paint and weathered appearance evoke a sense of nostalgia. Graffiti and peeling stickers can be seen on its surfaces, adding to its neglected state. The sky above is overcast, casting a greyish hue over the scene, enhancing the booth's frozen, timeless quality. The camera slowly circles the booth, capturing its deteriorated charm from all angles."
+  },
+  {
+    "prompt_en": "A tranquil tableau of the old red barn stood weathered and iconic against the backdrop of the countryside",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A tranquil scene captures an old red barn standing weathered and iconic against the backdrop of the serene countryside. The barn's aged wood and fading red paint add a rustic charm to the setting. Surrounding the barn are tall grasses and a few scattered wildflowers swaying gently in the breeze. The sky above is clear with a few wispy clouds, and the warm golden light of the late afternoon sun bathes the entire landscape, enhancing the peaceful and nostalgic atmosphere. The camera slowly pans from right to left, highlighting the barn's architectural details and the tranquility of its surroundings."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a picturesque barn was painted a warm shade of red and nestled in a picturesque meadow",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A tranquil scene features a charming barn painted in a warm shade of red, nestled amidst a lush, picturesque meadow. The barn exudes a rustic appeal with its wooden structure and simple design, sitting peacefully under a clear blue sky. The meadow is dotted with wildflowers and gently swaying grass, enhancing the serene atmosphere. Soft, natural lighting bathes the barn and meadow, creating an inviting and harmonious setting. The camera takes a gentle, sweeping movement around the barn, capturing the idyllic surroundings from various angles."
+  },
+  {
+    "prompt_en": "In a still frame, within the desolate desert, an oasis unfolded, characterized by the stoic presence of palm trees and a motionless, glassy pool of water",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame capturing the desolate desert, an oasis emerges, offering a stark contrast to its arid surroundings. Tall, stately palm trees stand in a cluster, their fronds reaching towards the sky, providing a touch of greenery in the vast sea of sand. At the center of the oasis is a motionless, glassy pool of water, reflecting the trees and the clear blue sky above. The scene is bathed in warm sunlight, creating a serene and tranquil atmosphere, with the sun gently illuminating the landscape. The camera remains static, allowing the viewer to fully absorb the calm and peaceful ambiance of this hidden sanctuary amidst the harsh desert environment."
+  },
+  {
+    "prompt_en": "In a still frame, the Parthenon's majestic Doric columns stand in serene solitude atop the Acropolis, framed by the tranquil Athenian landscape",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, the Parthenon's majestic Doric columns rise prominently atop the Acropolis, exuding an aura of timeless grace and strength. The robust columns, with their characteristic fluted designs, are bathed in the soft, golden light of the setting sun, highlighting their weathered, ancient surface. Surrounding these columns, the tranquil Athenian landscape stretches into the distance, featuring lush greenery and rolling hills that add a serene backdrop to this historic scene. The stillness of the moment captures the harmonious coexistence of architectural grandeur and natural beauty. The camera gently pans across, emphasizing the symmetry and dignity of the Parthenon against the expansive, peaceful skyline."
+  },
+  {
+    "prompt_en": "In a still frame, the Temple of Hephaestus, with its timeless Doric grace, stands stoically against the backdrop of a quiet Athens",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, the Temple of Hephaestus is captured with its enduring Doric columns, showcasing impeccable architectural elegance. The temple stands stoically amidst the lush greenery of the surrounding landscape. The lighting highlights the texture of the stone facade, and the peaceful atmosphere is enhanced by the view of a tranquil Athens skyline in the background. The camera focuses on the intricate details of the columns, providing a sense of timelessness and historical grandeur."
+  },
+  {
+    "prompt_en": "In a still frame, the ornate Victorian streetlamp stands solemnly, adorned with intricate ironwork and stained glass panels",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In the frame, an ornate Victorian streetlamp stands majestically, showcasing its intricate ironwork and colorful stained glass panels. The lamp's design is elaborate, with detailed patterns and decorative elements that exude a sense of historical charm and classic elegance. The scene is illuminated by soft and warm lighting, highlighting the streetlamp's artistry and craftsmanship against a gentle twilight sky. The camera offers a slightly upward angle, emphasizing the lamp's grandeur and exquisite details."
+  },
+  {
+    "prompt_en": "A tranquil tableau of the Stonehenge presented itself as an enigmatic puzzle, each colossal stone meticulously placed against the backdrop of tranquility",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "An awe-inspiring view of Stonehenge unfolds, capturing the ancient monument's mysterious allure. Each colossal stone is meticulously placed, standing against a serene and picturesque backdrop. The stones cast long shadows on the lush green grass, with the soft, golden light of the setting sun enhancing the scene's tranquil atmosphere. The camera smoothly pans across the stone circle, highlighting the intricate alignment and the natural beauty surrounding this legendary site."
+  },
+  {
+    "prompt_en": "In a still frame, in the vast desert, an oasis nestled among dunes, featuring tall palm trees and an air of serenity",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame set in the vast desert, an oasis appears nestled among the rolling dunes. Tall palm trees stand prominently around the shimmering water, their green fronds swaying gently in the light breeze. The sun casts a warm, golden hue across the sand, highlighting the tranquil and serene atmosphere of the oasis. The camera captures this scene from a slightly elevated angle, providing a broad view of the peaceful contrast between the lush greenery of the palm trees and the endless expanse of golden sand."
+  },
+  {
+    "prompt_en": "static view on a desert scene with an oasis, palm trees, and a clear, calm pool of water",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a serene desert oasis, where a cluster of tall, lush palm trees stands vibrant against the golden sands. In the foreground, a clear, calm pool of water gently reflects the palm trees and the clear blue sky above, adding to the tranquility of the setting. The lighting is warm and inviting, emphasizing the contrast between the verdant greenery of the oasis and the expansive, arid desert landscape surrounding it. The overall atmosphere is peaceful and idyllic, with no movement, as if time stands still in this beautiful desert retreat."
+  },
+  {
+    "prompt_en": "A tranquil tableau of an ornate Victorian streetlamp standing on a cobblestone street corner, illuminating the empty night",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures an ornate Victorian streetlamp standing gracefully on a cobblestone street corner. The intricate ironwork of the lamp is detailed, its design featuring swirling patterns and elegant curves. The lamp emits a gentle, warm glow, casting a soft pool of light on the cobblestones below. The calm night atmosphere is enhanced by the dimly lit surroundings, with shadows stretching across the empty street. The camera slowly pans from the base of the lamp upward, emphasizing the lamp's height and craftsmanship, before settling on the warm pool of light on the cobblestone."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a tranquil lakeside cabin nestled among tall pines, its reflection mirrored perfectly in the calm water",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a serene lakeside cabin surrounded by tall pines, their towering forms reflected perfectly in the lake's calm waters. The cabin, with its rustic wooden exterior, exudes a peaceful, cozy charm. Gentle ripples in the water add a subtle texture to the reflection, enhancing the tranquil atmosphere. The camera slowly pans from left to right, showcasing the harmonious blend of nature and architecture, bathed in the soft, warm light of either dawn or dusk. The overall mood is one of peace and solitude."
+  },
+  {
+    "prompt_en": "In a still frame, a vintage gas lantern, adorned with intricate details, gracing a historic cobblestone square",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, a vintage gas lantern stands prominently in a historic cobblestone square. The lantern features intricate metalwork and an elegant design, exuding an antique charm. The cobblestones create a textured background, enhancing the timeless atmosphere of the scene. Soft, ambient lighting bathes the square, highlighting the lantern's details and casting gentle shadows on the cobbled surface. The camera is fixed, focusing on the lantern and capturing the serene and nostalgic setting."
+  },
+  {
+    "prompt_en": "In a still frame, a tranquil Japanese tea ceremony room, with tatami mats, a delicate tea set, and a bonsai tree in the corner",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a serene Japanese tea ceremony room, bathed in soft, natural lighting. The room features traditional tatami mats that cover the floor, creating a warm and welcoming atmosphere. In the center, a delicate tea set is elegantly arranged, consisting of intricately designed tea bowls and a graceful tea pot, all placed on a small, polished wooden tray. In the corner of the room stands a carefully pruned bonsai tree, adding an element of nature and tranquility to the space. The composition exudes a sense of calm and harmony, inviting viewers to appreciate the beauty of the traditional setting."
+  },
+  {
+    "prompt_en": "A tranquil tableau of the Parthenon stands resolute in its classical elegance, a timeless symbol of Athens' cultural legacy",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a tranquil tableau of the Parthenon, standing resolute in its classical elegance. The iconic structure, with its majestic columns and intricate details, exudes a sense of timelessness. The camera gently pans from right to left, showcasing the Parthenon against a clear blue sky. Sunlight bathes the ancient stone, highlighting the architectural grandeur. The surrounding area is serene, with a few distant trees and hills visible. The atmosphere evokes a profound sense of Athens' rich cultural legacy and enduring history."
+  },
+  {
+    "prompt_en": "A tranquil tableau of in the heart of Plaka, the neoclassical architecture of the old city harmonizes with the ancient ruins",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In the heart of Plaka, a tranquil scene shows the perfect harmony between the neoclassical architecture of the old city and the ancient ruins. The classical buildings, with their elegant columns and detailed facades, present a refined aesthetic that complements the ancient stone structures nearby. The soft glow of the afternoon sun bathes the architecture in a warm, golden light, highlighting the intricate details and weathered surfaces. The camera gently pans across the scene to showcase the seamless blend of historical eras, creating an atmosphere of timeless elegance and serene beauty."
+  },
+  {
+    "prompt_en": "A tranquil tableau of in the desolate beauty of the American Southwest, Chaco Canyon's ancient ruins whispered tales of an enigmatic civilization that once thrived amidst the arid landscapes",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene unfolds with a tranquil view of Chaco Canyon's ancient ruins, nestled amidst the stark beauty of the American Southwest. The camera slowly pans over the arid landscape, capturing the timeless whisper of stone structures that speak of an enigmatic civilization. The ruins, with their intricate stonework, stand against the backdrop of a vast, open sky. Soft sunlight bathes the scene, accentuating the warm tones of the earth and the weathered stones. The atmosphere is one of serene mystery, inviting contemplation of the long-lost lives that once flourished here."
+  },
+  {
+    "prompt_en": "A tranquil tableau of at the edge of the Arabian Desert, the ancient city of Petra beckoned with its enigmatic rock-carved façades",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The scene captures a tranquil moment at the edge of the Arabian Desert, where the ancient city of Petra reveals its enigmatic rock-carved façades. Bathed in the warm, golden light of the setting sun, the intricate carvings etched into the reddish sandstone cliffs create a mesmerizing visual display. The atmosphere is serene and filled with a sense of timelessness, as shadows play across the rugged surface of the stone. The camera gently pans to encompass the grandeur of these ancient structures, highlighting their majestic and mysterious allure."
+  },
+  {
+    "prompt_en": "In a still frame, amidst the cobblestone streets, an Art Nouveau lamppost stood tall",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame capturing a serene evening scene, an elegant Art Nouveau lamppost stands tall amidst the cobblestone streets, casting a warm, inviting glow. The intricate design of the lamppost, with its curved lines and floral motifs, reflects the charm of the surrounding architecture. The yellow light from the lamp creates gentle shadows on the cobblestones, enhancing the nostalgic and tranquil atmosphere of the scene. The soft ambient lighting evokes a sense of quiet sophistication and timeless beauty."
+  },
+  {
+    "prompt_en": "A tranquil tableau of in the quaint village square, a traditional wrought-iron streetlamp featured delicate filigree patterns and amber-hued glass panels",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In the picturesque village square, a traditional wrought-iron streetlamp stands gracefully, showcasing intricate filigree patterns that wind elegantly around its structure. The streetlamp's amber-hued glass panels emit a warm, inviting glow, casting gentle light over the cobblestone path. The camera slowly pans upwards, highlighting the craftsmanship of the lantern and revealing charming village architecture in the background, under a serene evening sky."
+  },
+  {
+    "prompt_en": "A tranquil tableau of the lampposts were adorned with Art Deco motifs, their geometric shapes and frosted glass creating a sense of vintage glamour",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A tranquil scene features two elegant lampposts adorned with Art Deco motifs, their geometric shapes crafted from wrought iron and frosted glass shades exuding a sense of vintage glamour. The intricate patterns on the lampposts catch the light, creating a soft, ambient glow that illuminates the surroundings with a warm and inviting atmosphere. The camera slowly pans upward from the base of one lamppost to the top, showcasing the detailed craftsmanship and highlighting the stylish design elements that hearken back to a bygone era."
+  },
+  {
+    "prompt_en": "In a still frame, in the picturesque square, a Gothic-style lamppost adorned with intricate stone carvings added a touch of medieval charm to the setting",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a picturesque square, a Gothic-style lamppost stands prominently in the frame. The lamppost features intricate stone carvings that enhance its medieval charm, with ornate details that showcase architectural elegance. The square is softly illuminated by the warm glow of the lamppost, creating an inviting and atmospheric scene that captures the essence of historic beauty. The camera is positioned to provide a clear, focused view of the lamppost, emphasizing its detailed craftsmanship."
+  },
+  {
+    "prompt_en": "In a still frame, in the heart of the old city, a row of ornate lantern-style streetlamps bathed the narrow alleyway in a warm, welcoming light",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In the still frame, set in the heart of the old city, a row of ornate lantern-style streetlamps lines the narrow alleyway. These intricately designed lamps cast a warm, welcoming glow that illuminates the cobblestone path below. The light creates soft, elongated shadows that dance along the stone walls of the surrounding buildings, enhancing the historical charm of the scene. The atmosphere is peaceful and nostalgic, evoking a sense of timeless beauty in the old city."
+  },
+  {
+    "prompt_en": "A tranquil tableau of in the heart of the Utah desert, a massive sandstone arch spanned the horizon",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In the heart of the Utah desert, a massive sandstone arch elegantly spans the horizon. The arch's rich, earthy tones contrast beautifully with the deep blue sky above. The sun casts soft, golden light, accentuating the textured surface of the stone. Sparse greenery dotting the landscape adds a splash of color to the otherwise arid surroundings. The camera pans slowly from left to right, capturing the grandeur of the arch and the serenity of the desert."
+  },
+  {
+    "prompt_en": "A tranquil tableau of in the Arizona desert, a massive stone bridge arched across a rugged canyon",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In the Arizona desert, the scene captures a massive stone bridge gracefully arching across a rugged canyon. The bridge, with its majestic arches, casts gentle shadows onto the rocky terrain below. The surrounding desert landscape is bathed in the warm, golden hues of the setting sun, creating a serene and magnificent atmosphere. The camera pans slowly across the scene, highlighting the intricate details of the stone bridge and the vastness of the canyon, emphasizing the tranquil beauty of the desert vista."
+  },
+  {
+    "prompt_en": "A tranquil tableau of in the corner of the minimalist tea room, a bonsai tree added a touch of nature's beauty to the otherwise simple and elegant space",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In the corner of a minimalist tea room, a bonsai tree gracefully brings a touch of nature's beauty to the serene setting. The room is characterized by clean lines and subtle tones, creating a simple yet elegant atmosphere. The bonsai, with its intricately shaped branches and lush green foliage, stands on a small wooden table, serving as a captivating focal point. Soft light from a nearby window bathes the tree, highlighting its delicate details and enhancing the tranquil ambiance of the tea room. The camera moves in a gentle arc around the bonsai, capturing its beauty and the harmonious design of the space."
+  },
+  {
+    "prompt_en": "In a still frame, amidst the hushed ambiance of the traditional tea room, a meticulously arranged tea set awaited, with porcelain cups, a bamboo whisk",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, set within the serene ambiance of a traditional tea room, a meticulously arranged tea set takes center stage. Porcelain cups are neatly placed alongside a finely crafted bamboo whisk, all resting on a polished wooden table. The room's soft, diffused lighting enhances the delicate textures and elegant designs of the tea set, creating an atmosphere of calm and refinement. The backdrop features traditional Japanese decor, with tatami mats and shoji screens, adding to the tranquil and respectful space. The camera slowly pans from left to right, capturing the harmonious arrangement of the tea set and the peaceful surroundings."
+  },
+  {
+    "prompt_en": "In a still frame, nestled in the Zen garden, a rustic teahouse featured tatami seating and a traditional charcoal brazier",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame capturing the serene beauty of a Zen garden, a rustic teahouse stands gracefully. The teahouse features tatami mat seating, arranged in a harmonious pattern that invites quiet contemplation. A traditional charcoal brazier sits centrally, its metal finish offering a contrast to the natural textures of the wood and tatami. Soft, ambient light filters through the paper windows, creating a tranquil atmosphere within the teahouse. Lush greenery surrounds the structure, completing the scene with a touch of nature's elegance. The camera remains still, focusing on the peacefulness emanating from this serene setting."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a country estate's library featured elegant wooden shelves",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The video showcases a serene scene within a country estate's library, where elegantly carved wooden shelves line the walls, displaying a variety of books bound in rich, leather covers. The lighting is warm and inviting, casting a gentle glow across the room, highlighting the intricate woodwork of the shelving. The camera pans slowly from left to right, capturing the calm and inviting atmosphere, as well as the classic charm and grandeur of the space. A plush armchair and a small wooden table are positioned in front of a large window with soft curtains, completing the tranquil tableau."
+  },
+  {
+    "prompt_en": "A tranquil tableau of beneath the shade of a solitary oak tree, an old wooden park bench sat patiently",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "Beneath the expansive shade of a solitary oak tree, a weathered wooden park bench rests quietly on the lush grass. The bench, with its old, rustic charm, reveals the marks of time and weathering on its surface. Sunlight filters through the dense canopy of leaves, casting dappled patterns of light and shadow on the bench and the ground around it. The atmosphere is serene and peaceful, enhancing the sense of solitude. The camera gently pans from the top of the oak tree down to the bench, highlighting the contrasting texture of the tree bark and the worn wood."
+  },
+  {
+    "prompt_en": "A tranquil tableau of beside a tranquil pond, a weeping willow tree draped its branches gracefully over the water's surface, creating a serene tableau of reflection and calm",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A tranquil scene unfolds beside a serene pond, where the elegant branches of a weeping willow tree drape gracefully over the water's surface. The mirror-like pond reflects the tree's cascading foliage, enhancing the scene's peaceful and calming ambiance. Soft, natural lighting bathes this idyllic setting, casting gentle shadows and adding depth to the tableau. The camera slowly pans across the scene, capturing the harmonious interaction between the tree and its reflection on the still water."
+  },
+  {
+    "prompt_en": "A tranquil tableau of in the Zen garden, a perfectly raked gravel path led to a serene rock garden",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "A tranquil scene unfolds in a Zen garden, where a meticulously raked gravel path gracefully winds through the serene landscape, leading to a peaceful rock garden. The gravel is arranged in harmonious patterns, creating a sense of order and calm. The rock garden features an artful arrangement of variously sized stones, surrounded by smooth pebbles and minimalist greenery. The overall atmosphere is one of profound stillness and reflection. Soft sunlight filters through the trees, casting gentle shadows across the garden. The camera slowly pans over the path and garden, capturing the harmonious balance of nature and design."
+  },
+  {
+    "prompt_en": "In a still frame, a tranquil pond was fringed by weeping cherry trees, their blossoms drifting lazily onto the glassy surface",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame, a serene pond is bordered by elegant weeping cherry trees, their delicate pink blossoms cascading gently through the air. The petals float slowly, creating a soft, picturesque scene as they settle onto the glass-like surface of the pond, forming a scattered, floating carpet of blooms. This peaceful atmosphere is enhanced by long, graceful branches arching over the water, contributing to the tranquil beauty of the scene. The camera is positioned at a slight angle, capturing both the pond and the overhanging branches, showcasing the harmonious interaction between the cherry trees and the water below."
+  },
+  {
+    "prompt_en": "In a still frame, within the historic library's reading room, rows of antique leather chairs and mahogany tables offered a serene haven for literary contemplation",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In a still frame capturing the historic library's reading room, rows of antique leather chairs and mahogany tables create an atmosphere of serene elegance and literary contemplation. The rich, warm tones of the mahogany tables and the deep, polished leather of the chairs add a sense of timelessness and sophisticated charm. The gentle lighting casts a soft glow across the scene, highlighting the intricate woodwork and the inviting ambiance of this quiet haven. The camera remains still, emphasizing the tranquil and contemplative nature of the space."
+  },
+  {
+    "prompt_en": "A tranquil tableau of a peaceful orchid garden showcased a variety of delicate blooms",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "The camera pans slowly over a tranquil orchid garden, showcasing a variety of delicate blooms in a serene and peaceful atmosphere. The soft lighting illuminates the vibrant colors of the orchids, highlighting their exquisite petals and intricate patterns. A gentle breeze rustles the leaves, adding a sense of calm and natural beauty to the scene. The camera continues to sweep across the garden, capturing the harmony and quiet elegance of this enchanting space."
+  },
+  {
+    "prompt_en": "A tranquil tableau of in the serene courtyard, a centuries-old stone well stood as a symbol of a bygone era, its mossy stones bearing witness to the passage of time",
+    "dimension": [
+      "temporal_flickering"
+    ],
+    "refined_prompt": "In the serene courtyard, a centuries-old stone well stands at the center of a tranquil tableau. The well's mossy stones, aged and weathered, exude a sense of history, bearing silent witness to the passage of time. Surrounding the well, the courtyard is enveloped in a peaceful atmosphere, with soft sunlight filtering through the leaves of nearby trees, casting gentle shadows on the ground. The camera captures a steady, wide-angle view, slowly panning across the scene to reveal the well's intricate details and the quiet beauty of the surrounding courtyard."
+  },
+  {
+    "prompt_en": "a bird and a cat",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "bird and cat"
+      }
+    },
+    "refined_prompt": "A bird is perched on the branch of a tree, with its vibrant feathers illuminated by the warm sunlight filtering through the leaves. Below, a cat prowls stealthily across the grass, its eyes focused on the bird above. The cat, with sleek fur and a curious expression, moves cautiously forward, tail swaying slightly. Meanwhile, the bird occasionally glances down, its feathers ruffling slightly in the gentle breeze. The scene is set in a lush garden, with colorful flowers and dappled light creating a serene atmosphere. The camera slowly pans upward from the cat to the bird, capturing the graceful movements of both animals."
+  },
+  {
+    "prompt_en": "a cat and a dog",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "cat and dog"
+      }
+    },
+    "refined_prompt": "A charming cat and a playful dog are in a cozy living room, lounging on a soft carpet. The cat, with its sleek fur and bright eyes, is gently batting its paw at a small toy mouse. Meanwhile, the dog, with its fluffy coat and attentive expression, watches the cat's playful antics with curiosity. The setting is warm and inviting, with soft sunlight filtering in through a nearby window, casting a gentle glow on the carpet where the animals are. The gentle sway of the curtains adds to the calming atmosphere. The camera captures this heartwarming scene with a slow, smooth pan across the room, highlighting the interaction between the two animals."
+  },
+  {
+    "prompt_en": "a dog and a horse",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "dog and horse"
+      }
+    },
+    "refined_prompt": "On a lush green field, a beautiful dog is playfully running around a majestic horse. The dog has a sleek coat and a joyful expression, its tail wagging energetically. The horse, with a glossy mane and a strong, elegant stature, stands calmly, occasionally glancing at the lively dog. The scene has a serene and harmonious atmosphere. The camera captures a wide shot, moving slightly to follow the dog's movement, emphasizing the peaceful interaction between the two animals."
+  },
+  {
+    "prompt_en": "a horse and a sheep",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "horse and sheep"
+      }
+    },
+    "refined_prompt": "A majestic horse stands beside a fluffy sheep in a lush, green pasture under a bright, clear sky. The horse, with its shiny brown coat and flowing mane, stands tall and gracefully, staring into the distance. The sheep, with its woolly white fleece, grazes contentedly on the grass beside the horse. The scene is peaceful and pastoral, with a gentle breeze rustling the grass. The camera slowly pans from the horse to the sheep, highlighting their companionship and the serene countryside setting."
+  },
+  {
+    "prompt_en": "a sheep and a cow",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "sheep and cow"
+      }
+    },
+    "refined_prompt": "In a sunny, open pasture filled with lush green grass, a sheep and a cow stand grazing side by side. The sheep, with its fluffy white wool, is nibbling on the grass, while the cow, with its sleek brown and white coat, chews contentedly nearby. The bright daylight creates a serene and peaceful atmosphere, with a few small daisies scattered around their feet. The camera captures this idyllic scene from a slightly elevated angle, gradually zooming in to focus on the gentle interaction between the two animals."
+  },
+  {
+    "prompt_en": "a cow and an elephant",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "cow and elephant"
+      }
+    },
+    "refined_prompt": "A charming scene features a cow and an elephant standing side by side in a lush, green field. The cow is a vibrant brown and white, with its gentle eyes and smooth, glossy coat glistening under the bright sunlight. Beside it, the elephant, a majestic gray giant with expressive eyes, stands calmly, its large ears gently flapping in the breeze. The atmosphere is serene, with a clear blue sky overhead and patches of wildflowers scattered throughout the field. The camera smoothly pans across the scene, highlighting the gentle interaction between these two magnificent creatures against a peaceful landscape."
+  },
+  {
+    "prompt_en": "an elephant and a bear",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "elephant and bear"
+      }
+    },
+    "refined_prompt": "In a serene natural setting, an elephant and a bear are positioned side by side on a grassy field. The elephant, with its large ears and majestic trunk, stands calmly, its trunk gently grazing the grass. Next to it, the bear, with a thick fur coat and a curious expression, sits on its hind legs, observing its surroundings. The background features lush greenery and tall trees under a soft, natural light. The camera pans slowly from left to right, capturing the harmony between the two animals in their tranquil environment."
+  },
+  {
+    "prompt_en": "a bear and a zebra",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "bear and zebra"
+      }
+    },
+    "refined_prompt": "In a serene natural setting, a bear and a zebra stand side by side in a lush green meadow bathed in soft, warm sunlight. The bear, with its thick, dark fur and powerful build, looks curiously towards the zebra, which is characterized by its striking black and white stripes. The two animals stand peacefully together, with tall grass gently swaying in the background. The scene captures an unusual yet harmonious moment in nature. The camera remains steady, framing both animals as they coexist in the tranquil setting."
+  },
+  {
+    "prompt_en": "a zebra and a giraffe",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "zebra and giraffe"
+      }
+    },
+    "refined_prompt": "A scene unfolds in a vibrant savannah setting, where a zebra and a giraffe stand side by side under the bright afternoon sun. The zebra, with its distinctive black-and-white stripes, stands calmly on the grassy terrain, while the tall giraffe, with its long neck and patterned coat of brown patches, gracefully gazes around the area. The sky is a clear blue, contrasting beautifully with the animals and the grassland. The camera captures a gentle sweeping motion, providing a panoramic view of this serene wildlife moment."
+  },
+  {
+    "prompt_en": "a giraffe and a bird",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "giraffe and bird"
+      }
+    },
+    "refined_prompt": "A tall and graceful giraffe is standing in a sunlit savannah, with golden grass stretching out to the horizon. Perched delicately on one of the giraffe's long, elegant necks is a small, vibrant bird with bright blue and yellow feathers. The giraffe is calmly gazing into the distance, while the bird occasionally flutters its wings, adding a lively touch to the serene scene. The gentle movement of the golden grass in the breeze enhances the tranquil and natural ambiance. The camera slowly pans around the giraffe and bird, capturing their interaction against the backdrop of the vast, open landscape."
+  },
+  {
+    "prompt_en": "a chair and a couch",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "chair and couch"
+      }
+    },
+    "refined_prompt": "A plush armchair and a cozy couch are positioned in a well-lit living room setting. The armchair, featuring a soft, velvet upholstery in a deep blue hue, is angled slightly towards the couch. Next to it, the couch is upholstered in a light gray fabric with large cushions and offers ample seating space. Between the two, a small, round coffee table holds a few decorative items, such as a vase with fresh flowers and a book. The soft lighting and warm atmosphere create an inviting and comfortable space. The camera gently pans to show the arrangement from a slightly different angle, enhancing the room's serene ambiance."
+  },
+  {
+    "prompt_en": "a couch and a potted plant",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "couch and potted plant"
+      }
+    },
+    "refined_prompt": "A plush, light-colored couch with soft cushions is positioned against a wall in a cozy room. The couch appears inviting, its fabric catching the gentle ambient light. To the left of the couch, a large potted plant with lush, green leaves reaches upward, adding a touch of nature to the scene. The pot is a simple, elegant design. The camera remains static, capturing this serene and comfortable corner of the room, portraying a calm and welcoming atmosphere."
+  },
+  {
+    "prompt_en": "a potted plant and a tv",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "potted plant and tv"
+      }
+    },
+    "refined_prompt": "In a cozy living room setting, a green potted plant with broad, lush leaves is placed on a stand beside a sleek flat-screen TV. The TV is mounted on a modern entertainment console, and the screen is off, reflecting the room's ambient lighting. The plant adds a touch of nature and color to the scene, with its leaves fanning out elegantly, partially overlapping the TV's frame. The camera slowly pans from the plant to the TV, capturing the harmonious balance of technology and nature in the room."
+  },
+  {
+    "prompt_en": "a tv and a laptop",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "tv and laptop"
+      }
+    },
+    "refined_prompt": "A TV and a laptop are positioned next to each other on a sleek, modern entertainment stand. The TV displays a vibrant and colorful nature scene with lush green forests, while the laptop screen shows a spreadsheet filled with data. The TV's screen is large and commands attention, while the laptop is open and angled slightly towards the TV. The atmosphere is calm, with soft lighting enhancing the screens' brightness, creating a balanced visual contrast between nature and technology. The camera slowly pans from left to right, capturing the TV and then the laptop in sequence."
+  },
+  {
+    "prompt_en": "a laptop and a remote",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "laptop and remote"
+      }
+    },
+    "refined_prompt": "A sleek laptop with a thin profile is open on a polished wooden table. Its screen displays a vibrant image, casting a gentle glow onto the keyboard. Next to the laptop, a compact remote is placed with several buttons visible, including a bright red power button that stands out. The scene is well-lit, creating a clear reflection of both the laptop and remote on the table's surface. The camera pans slowly from right to left, emphasizing the harmonious arrangement of the two devices in this modern setup."
+  },
+  {
+    "prompt_en": "a remote and a keyboard",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "remote and keyboard"
+      }
+    },
+    "refined_prompt": "A close-up view shows a sleek remote control resting on the surface of a modern computer keyboard. The remote, with a black glossy finish, features various buttons, including volume and channel controls, and a large circular navigation pad. The keyboard, with its slim profile and evenly spaced keys, has a metallic finish that reflects light subtly. The scene is softly lit, creating a polished and sophisticated atmosphere as the camera slowly pans across the surface, highlighting the smooth textures of both devices."
+  },
+  {
+    "prompt_en": "a keyboard and a cell phone",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "keyboard and cell phone"
+      }
+    },
+    "refined_prompt": "A close-up of a sleek black and silver keyboard is shown, with the keys illuminated by a soft ambient light. Beside it, a modern smartphone with a glossy screen rests on the desk. The screen of the cell phone displays a vibrant image, casting a subtle glow onto the keyboard. The camera gently pans from left to right, creating a smooth and polished view of the items, enhancing the high-tech and professional atmosphere of the scene."
+  },
+  {
+    "prompt_en": "a cell phone and a book",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "cell phone and book"
+      }
+    },
+    "refined_prompt": "A cell phone is placed beside an open book on a wooden table. The phone screen is lit, displaying a vibrant blue and white interface, while the book is open to a page filled with text. Natural light filters in from a nearby window, casting soft shadows on the table and creating a warm, inviting ambiance. The camera gently pans over the scene, highlighting the contrast between modern technology and traditional reading materials."
+  },
+  {
+    "prompt_en": "a book and a clock",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "book and clock"
+      }
+    },
+    "refined_prompt": "A hardcover book rests on a wooden table, its cover featuring intricate golden lettering and an elaborate design. Beside the book is a vintage-style clock with a round face, Roman numerals, and elegant metal hands pointing to 3:45. The scene is warmly lit, casting soft shadows across the table and highlighting the textures of the book cover and the clock's ornate frame. The camera slowly pans from left to right, capturing the detailed craftsmanship of both the book and the clock in close-up."
+  },
+  {
+    "prompt_en": "a clock and a backpack",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "clock and backpack"
+      }
+    },
+    "refined_prompt": "A close-up view features a stylish clock and a backpack on a wooden table, with soft ambient lighting creating a warm atmosphere. The clock has a sleek design with a black rim and clear glass face, displaying elegantly crafted hour and minute hands pointing at 3 o'clock. Next to the clock, the backpack is made of a rugged canvas material, showcasing sturdy leather straps and a zippered pocket. The camera shifts slightly to create a gentle dynamic effect, highlighting the details of the clock's face and the texture of the backpack."
+  },
+  {
+    "prompt_en": "a backpack and an umbrella",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "backpack and umbrella"
+      }
+    },
+    "refined_prompt": "A stylish backpack, made of leather with detailed stitching, is placed on a wooden bench. Next to the backpack, a compact, black umbrella with a sleek, glossy finish is leaning against the bench. The bench is situated in a serene park setting, with soft sunlight filtering through the trees, casting dappled shadows on the ground. The scene captures the tranquility and preparedness for a sudden change in weather, evoking a relaxed and peaceful atmosphere."
+  },
+  {
+    "prompt_en": "an umbrella and a handbag",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "umbrella and handbag"
+      }
+    },
+    "refined_prompt": "An umbrella and a handbag are placed side by side on a sandy beach. The umbrella is open, displaying a vibrant blue and white striped pattern, providing shade and a striking contrast against the sand. The handbag, made of light beige wicker with leather handles, rests next to the umbrella on the sand, partially shaded by the umbrella's canopy. The sunlight highlights the textures of both items, creating an inviting and relaxed beach atmosphere. Shadows cast by the umbrella and handbag add dimension to the scene."
+  },
+  {
+    "prompt_en": "a handbag and a tie",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "handbag and tie"
+      }
+    },
+    "refined_prompt": "A sleek, elegant handbag and a stylish tie are displayed side by side on a polished wooden table. The handbag, made of smooth leather, features a glossy finish and subtle stitching details. Its handle rests gently on the table, creating a shadow in the soft, ambient lighting. The tie, made of fine silk, features a sophisticated pattern of diagonal stripes in complementary colors. Its fabric gleams slightly under the warm light, enhancing its luxurious appearance. The camera slowly pans from left to right, showcasing the craftsmanship and design of both the handbag and the tie."
+  },
+  {
+    "prompt_en": "a tie and a suitcase",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "tie and suitcase"
+      }
+    },
+    "refined_prompt": "A neatly positioned black necktie is coiled elegantly over the handle of a polished black leather suitcase. The suitcase, with shiny metallic locks, is set against a neutral background, exuding a sense of sophistication and professionalism. The camera slowly zooms in, capturing the rich textures of the tie and the gleaming surface of the suitcase, highlighting their stylish appeal and attention to detail."
+  },
+  {
+    "prompt_en": "a suitcase and a vase",
+    "dimension": [
+      "multiple_objects"
+    ],
+    "auxiliary_info": {
+      "multiple_objects": {
+        "object": "suitcase and vase"
+      }
+    },
+    "refined_prompt": "A stylish suitcase sits on a wooden table next to a delicate porcelain vase. The suitcase is medium-sized, with a textured leather finish and metal clasps that catch the light. It is positioned with its handle facing upwards. Beside it, the vase stands gracefully, adorned with intricate floral patterns in soft pastel colors. The vase is filled with fresh flowers, their vibrant petals adding a touch of color to the scene. The overall atmosphere is calm and elegant, enhanced by soft natural lighting illuminating the objects from one side. The camera gently pans from the suitcase to the vase, showcasing their details and creating a harmonious composition."
+  }
+]

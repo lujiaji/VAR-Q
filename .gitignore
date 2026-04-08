@@ -2,7 +2,7 @@ Benchmark/outputs
 Benchmark/results_txt
 Benchmark/output
 Benchmark/weights
-temp
+# temp
 __pycache__
 **/__pycache__/**
 **/.ipynb_checkpoints/**
