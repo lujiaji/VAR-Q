@@ -1,0 +1,30 @@
+{
+  "model": {
+    "model_type": "infinity_8b"
+  },
+  "quantization": {
+    "enable": true,
+    "q_bits": 4,
+    "quant_method": "KIVI",
+    "qkv_format": "BHLc",
+    "pack_to_int32": true,
+    "rescale_qk": false
+  },
+  "inference": {
+    "device": "cuda",
+    "seed": 0,
+    "cfg": 3.0,
+    "tau": 0.5,
+    "h_div_w": 1,
+    "enable_positive_prompt": 0
+  },
+  "ablation": {
+    "method": "KIVI",
+    "q_bits": 4,
+    "kivi_group_size": 128
+  },
+  "batch_processing": {
+    "total_iters": 1000,
+    "batch_size": 50
+  }
+}

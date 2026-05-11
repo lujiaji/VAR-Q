@@ -7,6 +7,21 @@ from typing import Dict, Any, Tuple
 import torch
 
 
+_LEGACY_ABLATION_METHOD_MAP = {
+    "KIVI": "ABL_KIVI",
+    "KIVI-CALI": "ABL_KIVI_CALI",
+    "FLexGen": "ABL_KV_FLexGen",
+    "FLEXGEN": "ABL_KV_FLexGen",
+    "KVQUANT": "ABL_KVQUANT",
+}
+
+
+def _normalize_quant_method_name(method: str) -> str:
+    raw = str(method)
+    normalized = raw.replace("_", "-").upper()
+    return _LEGACY_ABLATION_METHOD_MAP.get(normalized, raw)
+
+
 class VARQConfig:
     """Configuration manager for VAR-Q model (supports both VAR and Infinity)"""
     
@@ -22,6 +37,15 @@ class VARQConfig:
         
         with open(config_path, 'r') as f:
             self.config = json.load(f)
+        self._normalize_quant_methods()
+
+    def _normalize_quant_methods(self) -> None:
+        quant_cfg = self.config.get('quantization', {})
+        if 'quant_method' in quant_cfg:
+            quant_cfg['quant_method'] = _normalize_quant_method_name(quant_cfg['quant_method'])
+        ablation_cfg = self.config.get('ablation', {})
+        if 'method' in ablation_cfg:
+            ablation_cfg['method'] = _normalize_quant_method_name(ablation_cfg['method'])
     
     def get_model_config(self) -> Dict[str, Any]:
         """Get model configuration parameters"""
@@ -30,6 +54,14 @@ class VARQConfig:
     def get_quantization_config(self) -> Dict[str, Any]:
         """Get quantization configuration parameters"""
         return self.config['quantization'].copy()
+
+    def get_weight_quantization_config(self) -> Dict[str, Any]:
+        """Get weight quantization configuration parameters"""
+        return self.config.get('weight_quantization', {}).copy()
+
+    def get_ablation_config(self) -> Dict[str, Any]:
+        """Get ablation configuration parameters"""
+        return self.config.get('ablation', {}).copy()
     
     def get_inference_config(self) -> Dict[str, Any]:
         """Get inference configuration parameters"""
@@ -37,7 +69,7 @@ class VARQConfig:
     
     def get_checkpoint_config(self) -> Dict[str, Any]:
         """Get checkpoint configuration parameters"""
-        return self.config['checkpoints'].copy()
+        return self.config.get('checkpoints', {}).copy()
     
     
     def get_checkpoint_paths(self, model_depth: int = None) -> Tuple[str, str]:

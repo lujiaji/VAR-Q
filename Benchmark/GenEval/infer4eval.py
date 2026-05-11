@@ -12,8 +12,16 @@ import sys
 # Add project paths
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_THIS_DIR, '..', '..'))
-sys.path.append(_PROJECT_ROOT)
-sys.path.append(os.path.join(_PROJECT_ROOT, 'Infinity'))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.append(_PROJECT_ROOT)
+
+from VAR_Q.paths import require_third_party_repo
+from VAR_Q.hooks import install_varq_hooks
+from VAR_Q.infinity_config import add_infinity_config_file_argument, apply_infinity_config
+
+_INFINITY_ROOT = str(require_third_party_repo('Infinity', 'https://github.com/FoundationVision/Infinity'))
+if _INFINITY_ROOT not in sys.path:
+    sys.path.append(_INFINITY_ROOT)
 
 import cv2
 import tqdm
@@ -25,16 +33,6 @@ from infinity.utils.csv_util import load_csv_as_dicts, write_dicts2csv_file
 from tools.run_infinity import *
 from tools.run_infinity import _import_dynamic_resolution
 from conf import HF_TOKEN, HF_HOME
-
-# Add VAR_Q to path for config loading
-VARQConfig = None
-var_q_path = os.path.join(_PROJECT_ROOT, 'VAR_Q')
-if os.path.exists(var_q_path):
-    sys.path.append(var_q_path)
-    try:
-        from config_loader import VARQConfig
-    except Exception:
-        VARQConfig = None
 
 
 # set environment variables
@@ -51,86 +49,10 @@ if __name__ == '__main__':
     parser.add_argument('--metadata_file', type=str, default='prompts/evaluation_metadata.jsonl')
     parser.add_argument('--rewrite_prompt', type=int, default=0, choices=[0,1])
     parser.add_argument('--load_rewrite_prompt_cache', type=int, default=1, choices=[0,1])
-    # Note: q_bits, quant_method, qkv_format, config_file are already defined in add_common_arguments
+    add_infinity_config_file_argument(parser)
     args = parser.parse_args()
     
-    # Load configuration if provided
-    if args.config_file and os.path.exists(args.config_file):
-        print(f"[Config] Loading configuration from {args.config_file}")
-        try:
-            if VARQConfig is None:
-                raise RuntimeError("VARQConfig is not available (VAR_Q path not found)")
-            config = VARQConfig(args.config_file)
-            model_config = config.get_model_config()
-            quant_config = config.get_quantization_config()
-            inference_config = config.get_inference_config()
-            checkpoint_config = config.get_checkpoint_config()
-            
-            # Override args with config values
-            if 'model_type' in model_config:
-                args.model_type = model_config['model_type']
-            if 'model_path' in checkpoint_config:
-                args.model_path = checkpoint_config['model_path']
-            if 'vae_ckpt' in checkpoint_config:
-                args.vae_path = checkpoint_config['vae_ckpt']
-            if 'enable' in quant_config:
-                args.enable_quantization = int(quant_config['enable'])
-            if 'q_bits' in quant_config:
-                args.q_bits = quant_config['q_bits']
-            if 'quant_method' in quant_config:
-                args.quant_method = quant_config['quant_method']
-            if 'qkv_format' in quant_config:
-                args.qkv_format = quant_config['qkv_format']
-            if 'rescale_qk' in quant_config:
-                args.rescale_qk = int(quant_config['rescale_qk'])
-            if 'outlier_ratio' in quant_config:
-                args.outlier_ratio = float(quant_config['outlier_ratio'])
-            if 'outlier_mode' in quant_config:
-                args.outlier_mode = quant_config['outlier_mode']
-            if 'outlier_n_sigma' in quant_config:
-                args.outlier_n_sigma = float(quant_config['outlier_n_sigma'])
-            if 'cfg' in inference_config:
-                args.cfg = inference_config['cfg']
-            if 'tau' in inference_config:
-                args.tau = inference_config['tau']
-            if 'seed' in inference_config:
-                args.seed = inference_config['seed']
-            if 'h_div_w' in inference_config:
-                args.h_div_w_template = inference_config['h_div_w']
-            
-            # Set default text encoder path if not provided
-            if not hasattr(args, 'text_encoder_ckpt') or not args.text_encoder_ckpt:
-                args.text_encoder_ckpt = 'YOUR_PATH/flan-t5-xl'
-            
-            # Set model-specific parameters based on model type (only if not already set)
-            if not hasattr(args, 'vae_type') or args.vae_type == 1:  # 1 is the default from add_common_arguments
-                if args.model_type == "infinity_2b":
-                    args.vae_type = 32
-                    args.apply_spatial_patchify = 0
-                    args.checkpoint_type = "torch"
-                elif args.model_type == "infinity_8b":
-                    args.vae_type = 14
-                    args.apply_spatial_patchify = 1
-                    args.checkpoint_type = "torch_shard"
-                else:
-                    # Default to 2b configuration
-                    args.vae_type = 32
-                    args.apply_spatial_patchify = 0
-                    args.checkpoint_type = "torch"
-                
-            print(f"[Config] Configuration loaded successfully!")
-            print(f"[Config] Model: {args.model_type}")
-            print(f"[Config] VAR-Q Quantization: {'enabled' if args.enable_quantization else 'disabled'}")
-            if args.enable_quantization:
-                print(f"[Config]   - q_bits: {args.q_bits}")
-                print(f"[Config]   - quant_method: {args.quant_method}")
-                print(f"[Config]   - qkv_format: {args.qkv_format}")
-                print(f"[Config]   - rescale_qk: {args.rescale_qk}")
-        except Exception as e:
-            print(f"[Error] Failed to load configuration: {e}")
-            print("[Warning] Continuing with command-line arguments...")
-    else:
-        print("[Info] No configuration file provided, using command-line arguments")
+    apply_infinity_config(args)
 
     # parse cfg
     if isinstance(args.cfg, str):
@@ -169,6 +91,12 @@ if __name__ == '__main__':
         vae = load_visual_tokenizer(args)
         # load infinity
         infinity = load_transformer(vae, args)
+        install_varq_hooks(
+            infinity,
+            "infinity",
+            vars(args),
+            ablation_config=getattr(args, "ablation_config", None),
+        )
 
         if args.rewrite_prompt:
             from tools.prompt_rewriter import PromptRewriter
@@ -179,10 +107,14 @@ if __name__ == '__main__':
         outpath = os.path.join(args.outdir, f"{index:0>5}")
         os.makedirs(outpath, exist_ok=True)
         prompt = metadata['prompt']
-        print(f"Prompt ({index: >3}/{len(metadatas)}): '{prompt}'")
-
         sample_path = os.path.join(outpath, "samples")
         os.makedirs(sample_path, exist_ok=True)
+        # Idempotent skip: if all n_samples already on disk, skip this prompt.
+        existing = [f for f in os.listdir(sample_path) if f.endswith('.jpg') or f.endswith('.png')]
+        if len(existing) >= args.n_samples:
+            print(f"Prompt ({index: >3}/{len(metadatas)}) skip (cached): '{prompt}'")
+            continue
+        print(f"Prompt ({index: >3}/{len(metadatas)}): '{prompt}'")
         with open(os.path.join(outpath, "metadata.jsonl"), "w") as fp:
             json.dump(metadata, fp)
 

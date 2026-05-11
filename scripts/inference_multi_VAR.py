@@ -7,10 +7,18 @@ import argparse
 import numpy as np
 import PIL.Image as PImage, PIL.ImageDraw as PImageDraw
 
-# Add VAR-Q directory to Python path
-project_root = 'VAR-Q'
-sys.path.append(project_root)
-os.chdir(project_root)
+# Resolve repository root from this file instead of the caller's cwd.
+THIS_DIR = osp.dirname(osp.abspath(__file__))
+VARQ_ROOT = osp.dirname(THIS_DIR)
+if VARQ_ROOT not in sys.path:
+    sys.path.append(VARQ_ROOT)
+
+from VAR_Q.hooks import install_varq_hooks
+from VAR_Q.paths import prepend_sys_path, require_third_party_repo
+
+VAR_REPO_ROOT = require_third_party_repo("VAR", "https://github.com/FoundationVision/VAR")
+prepend_sys_path([VARQ_ROOT, VAR_REPO_ROOT.parent])
+os.chdir(VARQ_ROOT)
 
 setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)     # disable default parameter init for faster speed
 setattr(torch.nn.LayerNorm, 'reset_parameters', lambda self: None)  # disable default parameter init for faster speed
@@ -22,10 +30,22 @@ from VAR.utils.misc import create_npz_from_sample_folder
 
 # Create simple argparser - most parameters now in config
 parser = argparse.ArgumentParser(description='VAR-Q Multi-Image Inference')
-parser.add_argument("--config", type=str, default=None, help="Path to config file")
+parser.add_argument(
+    "--config",
+    type=str,
+    default="configs/var/varq/base/VAR-VARQ-8.json",
+    help="Path to config file",
+)
 parser.add_argument("--total_iters", type=int, default=None, help="Total number of iterations (overrides config)")
 parser.add_argument("--batch_size", type=int, default=None, help="Batch size per iteration (overrides config)")
-parser.add_argument("--save_path", type=str, default='Benchmark/outputs/VAR/images', help="Save path for generated images")
+parser.add_argument("--save_path", type=str, default='Benchmark/output/VAR/images', help="Save path for generated images")
+parser.add_argument("--vae_ckpt", type=str, default=os.environ.get("VARQ_VAE_CKPT"), help="Path to VAR VAE checkpoint")
+parser.add_argument(
+    "--var_ckpt_template",
+    type=str,
+    default=os.environ.get("VARQ_VAR_CKPT_TEMPLATE"),
+    help="Path template for VAR checkpoint, e.g. /path/to/var_d{}.pth",
+)
 args = parser.parse_args()
 
 # Load configuration
@@ -49,17 +69,24 @@ model_depth = config.get_model_config()['depth']
 assert model_depth in {16, 20, 24, 30, 36}
 
 
-# Get checkpoint paths from config
-vae_ckpt, var_ckpt = config.get_checkpoint_paths(model_depth)
-hf_home = config.get_checkpoint_config()['hf_home']
+if not args.vae_ckpt or not args.var_ckpt_template:
+    raise ValueError(
+        "VAR checkpoint paths are not stored in public JSON configs. "
+        "Pass --vae_ckpt and --var_ckpt_template, or set VARQ_VAE_CKPT and VARQ_VAR_CKPT_TEMPLATE."
+    )
+vae_ckpt = args.vae_ckpt
+var_ckpt = args.var_ckpt_template.format(model_depth)
 
-# Download checkpoints if they don't exist
-if not osp.exists(vae_ckpt):
-    print(f"Downloading VAE checkpoint from {hf_home}/{osp.basename(vae_ckpt)}")
-    os.system(f'wget {hf_home}/{osp.basename(vae_ckpt)}')
-if not osp.exists(var_ckpt):
-    print(f"Downloading VAR checkpoint from {hf_home}/{osp.basename(var_ckpt)}")
-    os.system(f'wget {hf_home}/{osp.basename(var_ckpt)}')
+def require_checkpoint(local_path: str):
+    if osp.exists(local_path):
+        return
+    raise FileNotFoundError(
+        f"Required checkpoint not found: {local_path}. "
+        "This script no longer auto-downloads checkpoints; pass the local weights path via CLI or environment variables."
+    )
+
+require_checkpoint(vae_ckpt)
+require_checkpoint(var_ckpt)
 
 # Get device from config
 device = config.get_device()
@@ -73,9 +100,17 @@ vae, var = build_vae_var_from_config(config.config, device=device)
 print("Loading checkpoints...")
 vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
 var.load_state_dict(torch.load(var_ckpt, map_location='cpu'), strict=True)
+if config.get_quantization_config().get("enable", False):
+    install_varq_hooks(
+        var,
+        "var",
+        config.get_quantization_config(),
+        ablation_config=config.get_ablation_config(),
+    )
 vae.eval(), var.eval()
 for p in vae.parameters(): p.requires_grad_(False)
 for p in var.parameters(): p.requires_grad_(False)
+
 print(f'Model preparation finished.')
 
 # Get inference parameters from config

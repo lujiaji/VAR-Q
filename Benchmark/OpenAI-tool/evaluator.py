@@ -29,7 +29,7 @@ def main():
     parser.add_argument("ref_batch", help="path to reference batch npz file")
     parser.add_argument("sample_batch", help="path to sample batch npz file")
     args = parser.parse_args()
-    os.environ["CUDA_VISIBLE_DEVICES"]="0"
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
     config = tf.ConfigProto(
         allow_soft_placement=True  # allows DecodeJpeg to run on CPU in Inception graph
     )

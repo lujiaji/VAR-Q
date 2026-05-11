@@ -9,18 +9,23 @@ InfinityStar 推理脚本（含 VAR-Q），用于验证修复后的生成效果�
   cd VAR-Q
   export ENABLE_VARQ=1
   export INFINITY_SCHEDULE=infinity_star_interact
-  PYTHONPATH=$PWD python InfinityStar/tools/infer_video_480p.py
-  生成结果在 InfinityStar/output/gen_videos/demo.mp4
+  PYTHONPATH=$PWD python third_party/InfinityStar/tools/infer_video_480p.py
+  生成结果在 third_party/InfinityStar/output/gen_videos/demo.mp4
 """
 import os
 import sys
+import argparse
 
-# 保证能 import InfinityStar 和 VAR_Q
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-infinity_star_root = os.path.join(repo_root, "InfinityStar")
-for p in [repo_root, infinity_star_root]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from VAR_Q.config_loader import VARQConfig
+from VAR_Q.hooks import install_varq_hooks
+from VAR_Q.paths import prepend_sys_path, require_third_party_repo
+
+infinity_star_root = str(require_third_party_repo("InfinityStar", "https://github.com/FoundationVision/InfinityStar"))
+prepend_sys_path([repo_root, infinity_star_root])
 os.chdir(infinity_star_root)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -49,7 +54,35 @@ from infinity.schedules import get_encode_decode_func
 
 
 def main():
-    checkpoints_dir = os.path.join(infinity_star_root, "")
+    parser = argparse.ArgumentParser(description="InfinityStar inference with VAR-Q runtime hooks")
+    parser.add_argument(
+        "--config",
+        default=os.environ.get(
+            "INFINITYSTAR_VARQ_CONFIG",
+            os.path.join(repo_root, "configs", "infinitystar", "varq", "base", "InfinityStar-VARQ-8.json"),
+        ),
+        help="VAR-Q JSON config.",
+    )
+    parser.add_argument(
+        "--checkpoints_dir",
+        default=os.environ.get("INFINITYSTAR_CHECKPOINTS_DIR", infinity_star_root),
+        help="Directory containing InfinityStar checkpoints.",
+    )
+    parser.add_argument(
+        "--prompt",
+        default="A handsome smiling gardener inspecting plants, realistic cinematic lighting, detailed textures, ultra-realistic",
+    )
+    parser.add_argument(
+        "--output",
+        default=os.path.join(repo_root, "scripts", "output", "infinitystar_varq_demo.mp4"),
+    )
+    cli = parser.parse_args()
+
+    public_config = VARQConfig(cli.config)
+    quant_config = public_config.get_quantization_config()
+    ablation_config = public_config.get_ablation_config()
+
+    checkpoints_dir = os.path.abspath(cli.checkpoints_dir)
     generation_duration = 5
     num_frames = generation_duration * 16 + 1
 
@@ -87,12 +120,13 @@ def main():
     args.use_flex_attn = 0
     args.rope2d_each_sa_layer = 1
     args.rope2d_normalized_by_hw = 2
-    # VAR-Q：启用量化以验证修复效果
-    args.enable_quantization = 1
-    args.q_bits = 8
-    args.quant_method = "G_SCALE_HEAD_DIM"
-    args.qkv_format = "BHLc"
-    args.rescale_qk = 0
+    # VAR-Q runtime config. Model/checkpoint paths stay outside public JSON files.
+    args.enable_quantization = int(bool(quant_config.get("enable", True)))
+    args.q_bits = int(quant_config.get("q_bits", 8))
+    args.quant_method = str(quant_config.get("quant_method", "VARQ"))
+    args.qkv_format = str(quant_config.get("qkv_format", "BHLc"))
+    args.rescale_qk = int(bool(quant_config.get("rescale_qk", False)))
+    args.ablation_config = ablation_config
 
     # 其他 InfinityStar 所需
     for attr, val in [
@@ -120,6 +154,12 @@ def main():
     vae = load_visual_tokenizer(args)
     vae = vae.float().to("cuda")
     infinity = load_transformer(vae, args)
+    install_varq_hooks(
+        infinity,
+        "infinitystar",
+        quant_config,
+        ablation_config=ablation_config,
+    )
     self_correction = SelfCorrection(vae, args)
 
     video_encode, video_decode, get_visual_rope_embeds, get_scale_pack_info = get_encode_decode_func(
@@ -140,7 +180,7 @@ def main():
         len(scale_schedule) - args.tower_split_index
     )
 
-    prompt = "A handsome smiling gardener inspecting plants, realistic cinematic lighting, detailed textures, ultra-realistic"
+    prompt = cli.prompt
     image_path = os.path.join(infinity_star_root, "assets", "reference_image.webp")
     if not os.path.isfile(image_path):
         image_path = None
@@ -200,9 +240,9 @@ def main():
         out_np = out_np[0]
     print(f"[InfinityStar] Done in {elapsed:.2f}s, shape {out_np.shape}")
 
-    out_dir = os.path.join(repo_root, "scripts", "output")
+    out_dir = os.path.dirname(os.path.abspath(cli.output))
     os.makedirs(out_dir, exist_ok=True)
-    save_path = os.path.join(out_dir, "infinitystar_varq_demo.mp4")
+    save_path = os.path.abspath(cli.output)
     save_video(out_np, fps=args.fps, save_filepath=save_path)
     print(f"Video saved: {save_path}")
 

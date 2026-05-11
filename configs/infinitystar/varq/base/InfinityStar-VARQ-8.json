@@ -1,0 +1,21 @@
+{
+  "model": {
+    "model_type": "infinitystar_8b_480p"
+  },
+  "quantization": {
+    "enable": true,
+    "q_bits": 8,
+    "quant_method": "VARQ",
+    "qkv_format": "BHLc",
+    "pack_to_int32": true,
+    "rescale_qk": false
+  },
+  "inference": {
+    "device": "cuda",
+    "seed": 0,
+    "cfg": 3.0,
+    "tau": 0.5,
+    "h_div_w": 1.0,
+    "enable_positive_prompt": 0
+  }
+}

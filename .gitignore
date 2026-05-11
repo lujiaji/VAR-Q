@@ -1,10 +1,34 @@
+assets/comparation
+assets/Infinity8B_fig
+Longlive_paper_v2
+varq_good_kivi_gptq_bad
+VAR/
+Infinity/
+InfinityStar/
 Benchmark/outputs
 Benchmark/results_txt
 Benchmark/output
 Benchmark/weights
-# temp
+Benchmark/latency/
+Benchmark/lower_metrics/
+Benchmark/MovieGen/
+temp/
+tests/
+third_party/*
+!third_party/README.md
+scripts/output/
+weights/
+*.pth
+*.pt
+*.safetensors
+*.ckpt
+*.mp4
+*.webm
+*.avi
+*.mov
 __pycache__
 **/__pycache__/**
 **/.ipynb_checkpoints/**
 recon_B3HW.png
-**/**.jpg **/**.png
+**/*.jpg
+**/*.png

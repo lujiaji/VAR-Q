@@ -1,0 +1,11 @@
+{
+  "enable": true,
+  "varq_root": ".",
+  "quant_method": "G_HEAD_DIM",
+  "qkv_format": "BLHc",
+  "q_bits": 4,
+  "pack_to_int32": true,
+  "dequant_dtype": "bf16",
+  "trace_events": false,
+  "max_scale_seq_len": 1560
+}

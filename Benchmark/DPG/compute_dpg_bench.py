@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument(
         "--csv",
         type=str,
-        default='/home/jiaji_lu/AR/VAR-Q/Benchmark/DPG/dpg_bench_updated.csv',
+        default=osp.join(osp.dirname(osp.abspath(__file__)), 'dpg_bench_updated.csv'),
     )
     parser.add_argument(
         "--res-path",
@@ -66,10 +66,11 @@ def parse_args():
 
 
 class MPLUG(torch.nn.Module):
-    def __init__(self, ckpt='/home/jiaji_lu/.cache/modelscope/mplug_vqa/iic/mplug_visual-question-answering_coco_large_en', device='gpu'):
+    def __init__(self, ckpt=None, device='gpu'):
         super().__init__()
         from modelscope.pipelines import pipeline
         from modelscope.utils.constant import Tasks
+        ckpt = ckpt or os.environ.get('MPLUG_VQA_MODEL', 'iic/mplug_visual-question-answering_coco_large_en')
         self.pipeline_vqa = pipeline(Tasks.visual_question_answering, model=ckpt, device=device)
 
     def vqa(self, image, question):

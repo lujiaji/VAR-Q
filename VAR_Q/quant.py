@@ -1,10 +1,21 @@
 import torch
-from typing import Optional, Tuple, Dict
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+
+from VAR_Q.pack_unpack import (
+    pack_last_dim_to_int32_python,
+    unpack_last_dim_from_int32_python,
+    TRITON_PACK_BITS,
+)
+
 try:
-    from VAR_Q.pack_unpack import pack_last_dim_to_int32_triton, unpack_last_dim_from_int32_triton
+    from VAR_Q.pack_unpack import (
+        pack_last_dim_to_int32_triton,
+        unpack_last_dim_from_int32_triton,
+    )
     _HAS_TRITON = True
 except Exception:
-    from VAR_Q.pack_unpack import pack_last_dim_to_int32_python, unpack_last_dim_from_int32_python
+    pack_last_dim_to_int32_triton = None
+    unpack_last_dim_from_int32_triton = None
     _HAS_TRITON = False
 
 """
@@ -33,6 +44,10 @@ In VAR-Q, we define different grouping strategies for quantization:
 - **G_SCALE_HEAD_DIM**: quantize each incoming K/V tensor per scale before concatenating with the cached K/V.  
   Each scale maintains its own scaling factors, leading to `num_scales × H × c` groups (e.g., `10 × 20 × 64 = 12,800` for VAR).  
 
+- **VARQ**: quantize each incoming K/V tensor per scale, per batch sample, and per feature.  
+  This keeps one scale for every `B × H × c` group inside the current AR step, which is useful when
+  different samples in the batch have noticeably different activation ranges.
+
 - **G_HEAD_DIM**: first dequantize cached tensors, concatenate with the new tensor, and then quantize the entire result along the head and dimension axes.  
   This produces `H × c` groups (e.g., `20 × 64` for VAR).  
 
@@ -49,12 +64,105 @@ These grouping strategies allow us to explore different quantization granulariti
 
 """
 
+CANONICAL_QUANT_METHODS = (
+    "VARQ",
+    "G_TENSOR",
+    "G_SCALE_HEAD_DIM",
+    "G_HEAD_DIM",
+    "G_SCALE",
+    "G_TOKEN",
+    "G_TOKEN_HEAD",
+)
+
+SUPPORTED_QUANT_METHODS = CANONICAL_QUANT_METHODS
+
+DEFAULT_QUANT_METHOD = "VARQ"
+DEFAULT_COMPRESSION_RATIO = 1.0
+
+
+def normalize_quant_method(quant_method: str) -> str:
+    return str(quant_method)
+
+
+def _normalize_kv_role(kv_role: str) -> str:
+    role = str(kv_role).lower()
+    if role not in ("k", "v"):
+        raise ValueError(f"Unsupported kv_role={kv_role}; expected 'k' or 'v'")
+    return role
+
+
+def _group_lengths_for_axis(total: int, group_size: int) -> List[int]:
+    if group_size <= 0:
+        raise ValueError(f"group_size must be positive, got {group_size}")
+    if total < 0:
+        raise ValueError(f"axis length must be non-negative, got {total}")
+    return [min(group_size, total - start) for start in range(0, total, group_size)]
+
+
+def _to_bhld_layout(tensor: torch.Tensor, qkv_format: str) -> torch.Tensor:
+    if qkv_format == "BLHc":
+        return tensor.permute(0, 2, 1, 3).contiguous()
+    if qkv_format == "BHLc":
+        return tensor
+    raise ValueError(f"Unsupported qkv_format={qkv_format}")
+
+
+def _from_bhld_layout(tensor: torch.Tensor, qkv_format: str) -> torch.Tensor:
+    if qkv_format == "BLHc":
+        return tensor.permute(0, 2, 1, 3).contiguous()
+    if qkv_format == "BHLc":
+        return tensor
+    raise ValueError(f"Unsupported qkv_format={qkv_format}")
+
+
+def _clone_quant_meta(quant_meta: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if quant_meta is None:
+        return None
+    cloned = dict(quant_meta)
+    if "group_lengths" in cloned and cloned["group_lengths"] is not None:
+        cloned["group_lengths"] = [int(v) for v in cloned["group_lengths"]]
+    if "orig_shape" in cloned and cloned["orig_shape"] is not None:
+        cloned["orig_shape"] = tuple(int(v) for v in cloned["orig_shape"])
+    return cloned
+
+
+def _is_compact_scale_meta(quant_meta: Optional[Dict[str, Any]]) -> bool:
+    return bool(quant_meta) and str(quant_meta.get("scheme", "")) == "COMPACT_SCALE"
+
+
+def _expand_compact_scale_for_shape(
+    scale: torch.Tensor,
+    quant_meta: Dict[str, Any],
+    target_shape: Sequence[int],
+) -> torch.Tensor:
+    group_lengths = [int(v) for v in quant_meta.get("group_lengths", ())]
+    if not group_lengths:
+        return scale
+    qkv_format = str(quant_meta.get("qkv_format", "BLHc"))
+    seq_dim = 1 if qkv_format == "BLHc" else 2
+    expanded = scale.repeat_interleave(
+        torch.tensor(group_lengths, device=scale.device, dtype=torch.long),
+        dim=seq_dim,
+    )
+    target_len = int(target_shape[seq_dim])
+    if expanded.size(seq_dim) > target_len:
+        slices = [slice(None)] * expanded.ndim
+        slices[seq_dim] = slice(0, target_len)
+        expanded = expanded[tuple(slices)]
+    return expanded
+
 class VAR_Q:
     def __init__(
         self,
         quant_bits: int = 8,
         qkv_format: str = 'BLHc',  # (B,L,H,c) or (B,H,L,c)
-        quant_method: str = 'G_SCALE_HEAD_DIM',  # ['G_TENSOR','G_SCALE_HEAD_DIM','G_HEAD_DIM','G_SCALE','G_TOKEN','G_TOKEN_HEAD']
+        quant_method: str = DEFAULT_QUANT_METHOD,
+        kv_role: str = "k",
+        kivi_group_size: int = 128,
+        kivi_cali_k_group_size: int = 128,
+        kivi_cali_v_group_size: int = 128,
+        compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
+        max_scale_seq_len: Optional[int] = None,
         blk_idx: int = 0,
         pack_to_int32: bool = True,
         eps: float = 1e-12,
@@ -66,12 +174,33 @@ class VAR_Q:
         outlier_n_sigma: float = 3.0,
     ):
         assert qkv_format in ('BLHc','BHLc'), f"Invalid qkv_format: {qkv_format}"
-        assert quant_method in ('G_TENSOR','G_SCALE_HEAD_DIM','G_HEAD_DIM','G_SCALE','G_TOKEN','G_TOKEN_HEAD'), \
+        quant_method = normalize_quant_method(quant_method)
+        assert quant_method in CANONICAL_QUANT_METHODS, \
             f"Invalid quant_method: {quant_method}"
-        assert 1 < quant_bits <= 8, "Only support (2..8] bits (common 2/4/8 bits); bit-pack implementation covers 2/4/8 bits"
+        kv_role = _normalize_kv_role(kv_role)
+        assert 1 < quant_bits <= 8, "Only support (2..8] bits; validated entry points allow 2/3/4/6/8 bits"
+        if pack_to_int32 and quant_bits not in (2, 3, 4, 6, 8):
+            raise ValueError(
+                f"pack_to_int32=True only supports q_bits in (2, 3, 4, 6, 8), got q_bits={quant_bits}"
+            )
+        if not (0.0 < float(compression_ratio)):
+            raise ValueError(
+                f"compression_ratio must be positive, got {compression_ratio}"
+            )
+        if max_scale_seq_len is not None and int(max_scale_seq_len) <= 0:
+            raise ValueError(
+                f"max_scale_seq_len must be positive when provided, got {max_scale_seq_len}"
+            )
         assert outlier_mode in ('ratio', 'sigma'), f"Invalid outlier_mode: {outlier_mode}"
         self.quant_bits = quant_bits
         self.quant_method = quant_method
+        self.kv_role = kv_role
+        # Retained only for call-site compatibility with older integrations.
+        self.kivi_group_size = int(kivi_group_size)
+        self.kivi_cali_k_group_size = int(kivi_cali_k_group_size)
+        self.kivi_cali_v_group_size = int(kivi_cali_v_group_size)
+        self.compression_ratio = float(compression_ratio)
+        self.max_scale_seq_len = int(max_scale_seq_len) if max_scale_seq_len is not None else None
         self.cur_blk_idx = blk_idx
         self.pack_to_int32 = pack_to_int32
         self.eps = eps
@@ -93,10 +222,13 @@ class VAR_Q:
         # Cache: maybe int8 or packed int32; scale is fp32 (broadcastable)
         self.cached_item: Optional[torch.Tensor] = None
         self.cached_scale: Optional[torch.Tensor] = None
+        self.cached_quant_meta: Optional[Dict[str, Any]] = None
 
         # Current step
         self.quantized_item: Optional[torch.Tensor] = None
         self.scale: Optional[torch.Tensor] = None
+        self.quant_meta: Optional[Dict[str, Any]] = None
+        self._replace_cache_on_next_cache: bool = False
 
         # pack/unpack meta (assuming c is constant across steps, so meta is constant)
         self._pack_meta: Optional[Dict[str,int]] = None  # {'orig_c','vals_per_word','pad_len','bits'}
@@ -114,10 +246,12 @@ class VAR_Q:
         self.outlier_cached_values: Optional[torch.Tensor] = None  # (M,) bf16
         self._L_offset: int = 0
 
-        # Per-step token counts for compact-scale methods (G_SCALE_HEAD_DIM, G_SCALE, G_TENSOR).
+        # Per-step token counts for compact-scale methods
+        # (G_SCALE_HEAD_DIM, VARQ, G_SCALE, G_TENSOR).
         # These methods produce a single scale vector (L-dim=1) per step; we store it compactly
         # and use repeat_interleave to reconstruct full-L scale only during dequantization.
         self._scale_L_counts: list = []
+        self._cur_scale_L_counts: list = []
 
     def set_qkv_format(self, fmt: str):
         """Update qkv_format and synchronize dim_cat / dim_map accordingly."""
@@ -128,6 +262,7 @@ class VAR_Q:
             self.dim_cat = 1
             self.dim_map = {
                 'G_TENSOR':        (0,1,2,3),
+                'VARQ':            (1,),
                 'G_SCALE_HEAD_DIM':(0,1),
                 'G_HEAD_DIM':      (0,1),
                 'G_TOKEN':         (0,2,3),
@@ -138,6 +273,7 @@ class VAR_Q:
             self.dim_cat = 2
             self.dim_map = {
                 'G_TENSOR':        (0,1,2,3),
+                'VARQ':            (2,),
                 'G_SCALE_HEAD_DIM':(0,2),
                 'G_HEAD_DIM':      (0,2),
                 'G_TOKEN':         (0,1,3),
@@ -167,16 +303,75 @@ class VAR_Q:
 
     def _dequantize_from_int8(self, q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         return (q.to(torch.float32) * scale).to(self.dequant_dtype)
+
+    def _seq_dim_size(self, tensor: torch.Tensor) -> int:
+        return int(tensor.size(self.dim_cat))
+
+    def _compact_chunk_lengths(self, tensor: torch.Tensor) -> List[int]:
+        seq_len = self._seq_dim_size(tensor)
+        if seq_len <= 0:
+            return []
+        if self.max_scale_seq_len is None and self.compression_ratio >= 1.0:
+            return [seq_len]
+        base_len = int(self.max_scale_seq_len or seq_len)
+        chunk_seq_len = max(1, int(torch.ceil(torch.tensor(base_len * self.compression_ratio)).item()))
+        if chunk_seq_len >= seq_len:
+            return [seq_len]
+        return [min(chunk_seq_len, seq_len - start) for start in range(0, seq_len, chunk_seq_len)]
+
+    def _slice_seq(self, tensor: torch.Tensor, start: int, end: int) -> torch.Tensor:
+        slices = [slice(None)] * tensor.ndim
+        slices[self.dim_cat] = slice(start, end)
+        return tensor[tuple(slices)]
+
+    def _quantize_compact_chunks(
+        self,
+        item: torch.Tensor,
+        reduce_dims: Tuple[int, ...],
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[int]]:
+        chunk_lengths = self._compact_chunk_lengths(item)
+        if not chunk_lengths:
+            raise ValueError("Cannot quantize empty tensor with compact chunking.")
+        q_chunks: List[torch.Tensor] = []
+        scale_chunks: List[torch.Tensor] = []
+        start = 0
+        for chunk_len in chunk_lengths:
+            end = start + chunk_len
+            chunk = self._slice_seq(item, start, end)
+            scale_chunk = self._compute_scale(chunk, reduce_dims, keepdim=True)
+            q_chunks.append(self._quantize_to_int8(chunk, scale_chunk))
+            scale_chunks.append(scale_chunk)
+            start = end
+        q = torch.cat(q_chunks, dim=self.dim_cat)
+        scale = torch.cat(scale_chunks, dim=self.dim_cat)
+        return q, scale, chunk_lengths
+
+    def _to_bhld(self, tensor: torch.Tensor) -> torch.Tensor:
+        return _to_bhld_layout(tensor, self.qkv_format)
+
+    def _from_bhld(self, tensor: torch.Tensor) -> torch.Tensor:
+        return _from_bhld_layout(tensor, self.qkv_format)
+
+    def _expand_scale_for_tensor(
+        self,
+        scale: torch.Tensor,
+        quant_meta: Optional[Dict[str, Any]],
+        target_shape: Sequence[int],
+    ) -> torch.Tensor:
+        if _is_compact_scale_meta(quant_meta):
+            return _expand_compact_scale_for_shape(scale, quant_meta, target_shape)
+        return scale
     
     # ---------- Pack/unpack last dimension to/from int32 ----------
     def _pack_last_dim_to_int32(self, q_int8: torch.Tensor, bits: int) -> Tuple[torch.Tensor, Dict[str,int]]:
-        if _HAS_TRITON:
+        if _HAS_TRITON and q_int8.is_cuda and bits in TRITON_PACK_BITS:
             return pack_last_dim_to_int32_triton(q_int8, bits)
         else:
             return pack_last_dim_to_int32_python(q_int8, bits)
 
     def _unpack_last_dim_from_int32(self, packed: torch.Tensor, meta: Dict[str,int]) -> torch.Tensor:
-        if _HAS_TRITON:
+        bits = int(meta["bits"])
+        if _HAS_TRITON and packed.is_cuda and bits in TRITON_PACK_BITS:
             return unpack_last_dim_from_int32_triton(packed, meta)
         else:
             return unpack_last_dim_from_int32_python(packed, meta)
@@ -223,14 +418,29 @@ class VAR_Q:
     # ---------- Main quantization process ----------
     def quant(self, item: torch.Tensor):
         m = self.quant_method
+        self.quant_meta = None
+        self._replace_cache_on_next_cache = False
+        self._cur_scale_L_counts = []
         red = self.dim_map[m]
 
         # Extract and zero-out outliers before quantization
         item = self._extract_outliers(item)
 
-        if m in ('G_SCALE_HEAD_DIM', 'G_TOKEN', 'G_TOKEN_HEAD', 'G_SCALE'):
-            scale = self._compute_scale(item, red, keepdim=True)
-            q = self._quantize_to_int8(item, scale)
+        if m in ('VARQ', 'G_SCALE_HEAD_DIM', 'G_TOKEN', 'G_TOKEN_HEAD', 'G_SCALE'):
+            if m in ('VARQ', 'G_SCALE_HEAD_DIM', 'G_SCALE') and (self.compression_ratio < 1.0 or self.max_scale_seq_len is not None):
+                q, scale, chunk_lengths = self._quantize_compact_chunks(item, red)
+                self._cur_scale_L_counts = list(chunk_lengths)
+                self.quant_meta = {
+                    "scheme": "COMPACT_SCALE",
+                    "group_lengths": list(chunk_lengths),
+                    "qkv_format": self.qkv_format,
+                    "orig_shape": tuple(int(v) for v in item.shape),
+                }
+            else:
+                scale = self._compute_scale(item, red, keepdim=True)
+                q = self._quantize_to_int8(item, scale)
+                if m in self._COMPACT_SCALE_METHODS:
+                    self._cur_scale_L_counts = [q.size(self.dim_cat)]
 
         elif m in ('G_HEAD_DIM', 'G_TENSOR'):
             if self.cached_item is not None and self.cached_scale is not None:
@@ -259,7 +469,7 @@ class VAR_Q:
         self.scale = scale
 
     # ---------- Reconstruct compact scale to full L dimension ----------
-    _COMPACT_SCALE_METHODS = frozenset(('G_SCALE_HEAD_DIM', 'G_SCALE', 'G_TENSOR'))
+    _COMPACT_SCALE_METHODS = frozenset(('VARQ', 'G_SCALE_HEAD_DIM', 'G_SCALE', 'G_TENSOR'))
 
     def _reconstruct_scale_for_L(self, scale: torch.Tensor, target_L: int) -> torch.Tensor:
         """Expand compact scale from (num_scales) to (L_total) along L-dim via repeat_interleave.
@@ -280,17 +490,22 @@ class VAR_Q:
         m = self.quant_method
         q_cur = self.quantized_item
         s_cur = self.scale          # compact — do NOT expand along L
+        meta_cur = _clone_quant_meta(self.quant_meta)
 
-        if m in ('G_SCALE_HEAD_DIM', 'G_SCALE', 'G_TOKEN', 'G_TOKEN_HEAD', 'G_TENSOR'):
+        if m in ('VARQ', 'G_SCALE_HEAD_DIM', 'G_SCALE', 'G_TOKEN', 'G_TOKEN_HEAD', 'G_TENSOR'):
             if self.cached_item is None:
                 self.cached_item, self.cached_scale = q_cur, s_cur
+                self.cached_quant_meta = meta_cur
             else:
                 self.cached_item  = torch.cat([self.cached_item,  q_cur], dim=self.dim_cat)
                 self.cached_scale = torch.cat([self.cached_scale, s_cur], dim=self.dim_cat)
+                if meta_cur is not None:
+                    self.cached_quant_meta = _clone_quant_meta(meta_cur)
             if m in self._COMPACT_SCALE_METHODS:
-                self._scale_L_counts.append(q_cur.size(self.dim_cat))
+                self._scale_L_counts.extend(self._cur_scale_L_counts or [q_cur.size(self.dim_cat)])
         elif m in ('G_HEAD_DIM', 'G_TENSOR'):
             self.cached_item, self.cached_scale = q_cur, s_cur
+            self.cached_quant_meta = meta_cur
         else:
             raise ValueError(f"[VAR-Q]: Invalid quantization method: {m}")
 
@@ -325,9 +540,17 @@ class VAR_Q:
         if self.pack_to_int32:
             assert self._pack_meta is not None, "pack meta is missing"
             q_int8 = self._unpack_last_dim_from_int32(self.quantized_item, self._pack_meta)
-            result = self._dequantize_from_int8(q_int8, self.scale)
         else:
-            result = self._dequantize_from_int8(self.quantized_item, self.scale)
+            q_int8 = self.quantized_item
+        scale = self.scale
+        if self.quant_method in self._COMPACT_SCALE_METHODS and scale.size(self.dim_cat) < q_int8.size(self.dim_cat):
+            counts = self._cur_scale_L_counts or [q_int8.size(self.dim_cat)]
+            scale = scale.repeat_interleave(
+                torch.tensor(counts, device=scale.device, dtype=torch.long),
+                dim=self.dim_cat,
+            )
+        scale = self._expand_scale_for_tensor(scale, self.quant_meta, q_int8.shape)
+        result = self._dequantize_from_int8(q_int8, scale)
         if self._cur_outlier_indices is not None:
             result = self._scatter_outliers(result, self._cur_outlier_indices, self._cur_outlier_values)
         return result
@@ -343,9 +566,10 @@ class VAR_Q:
         if self.pack_to_int32:
             assert self._pack_meta is not None, "pack meta is missing"
             q_int8 = self._unpack_last_dim_from_int32(self.cached_item, self._pack_meta)
-            result = self._dequantize_from_int8(q_int8, scale)
         else:
-            result = self._dequantize_from_int8(self.cached_item, scale)
+            q_int8 = self.cached_item
+        scale = self._expand_scale_for_tensor(scale, self.cached_quant_meta, q_int8.shape)
+        result = self._dequantize_from_int8(q_int8, scale)
         if self.outlier_cached_indices is not None:
             result = self._scatter_outliers(result, self.outlier_cached_indices, self.outlier_cached_values)
         return result
@@ -375,6 +599,396 @@ class VAR_Q:
         if return_theta:
             return q, k, theta
         return q, k
+
+
+SUPPORTED_QUANT_BITS = (2, 3, 4, 6, 8)
+SUPPORTED_QKV_FORMATS = ("BLHc", "BHLc")
+
+
+def resolve_dequant_dtype(dequant_dtype: str | torch.dtype) -> torch.dtype:
+    if isinstance(dequant_dtype, torch.dtype):
+        return dequant_dtype
+    if dequant_dtype == "fp32":
+        return torch.float32
+    if dequant_dtype == "fp16":
+        return torch.float16
+    if dequant_dtype == "bf16":
+        return torch.bfloat16
+    raise ValueError(f"Unsupported dequant_dtype: {dequant_dtype}")
+
+
+def _dequant_dtype_name(dequant_dtype: str | torch.dtype) -> str:
+    resolved = resolve_dequant_dtype(dequant_dtype)
+    if resolved == torch.float32:
+        return "fp32"
+    if resolved == torch.float16:
+        return "fp16"
+    return "bf16"
+
+
+def validate_quantization_args(
+    quant_bits: int,
+    qkv_format: str,
+    quant_method: str,
+    pack_to_int32: bool,
+    kv_role: str = "k",
+    kivi_group_size: int = 128,
+    kivi_cali_k_group_size: int = 128,
+    kivi_cali_v_group_size: int = 128,
+    compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
+    max_scale_seq_len: Optional[int] = None,
+) -> None:
+    normalized_method = normalize_quant_method(quant_method)
+    if pack_to_int32:
+        if quant_bits not in SUPPORTED_QUANT_BITS:
+            raise ValueError(
+                f"Unsupported quant_bits={quant_bits} with pack_to_int32=True. "
+                f"Pack-supported values: {SUPPORTED_QUANT_BITS}"
+            )
+    else:
+        if not (1 < int(quant_bits) <= 8):
+            raise ValueError(
+                f"Unsupported quant_bits={quant_bits}. Without pack_to_int32, "
+                f"any integer in (1, 8] is allowed."
+            )
+    if qkv_format not in SUPPORTED_QKV_FORMATS:
+        raise ValueError(
+            f"Unsupported qkv_format={qkv_format}. Supported values: {SUPPORTED_QKV_FORMATS}"
+        )
+    if normalized_method not in CANONICAL_QUANT_METHODS:
+        raise ValueError(
+            f"Unsupported quant_method={quant_method}. Supported values: {SUPPORTED_QUANT_METHODS}"
+        )
+    _normalize_kv_role(kv_role)
+    if not (0.0 < float(compression_ratio)):
+        raise ValueError(f"compression_ratio must be positive, got {compression_ratio}")
+    if max_scale_seq_len is not None and int(max_scale_seq_len) <= 0:
+        raise ValueError(f"max_scale_seq_len must be positive when provided, got {max_scale_seq_len}")
+
+
+def quantize_tensor(
+    item: torch.Tensor,
+    quant_bits: int,
+    qkv_format: str,
+    quant_method: str,
+    pack_to_int32: bool,
+    dequant_dtype: str | torch.dtype,
+    kv_role: str = "k",
+    kivi_group_size: int = 128,
+    kivi_cali_k_group_size: int = 128,
+    kivi_cali_v_group_size: int = 128,
+    compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
+    max_scale_seq_len: Optional[int] = None,
+) -> Dict[str, Any]:
+    validate_quantization_args(
+        quant_bits=quant_bits,
+        qkv_format=qkv_format,
+        quant_method=quant_method,
+        pack_to_int32=pack_to_int32,
+        kv_role=kv_role,
+        kivi_group_size=kivi_group_size,
+        kivi_cali_k_group_size=kivi_cali_k_group_size,
+        kivi_cali_v_group_size=kivi_cali_v_group_size,
+        compression_ratio=compression_ratio,
+        max_scale_seq_len=max_scale_seq_len,
+    )
+    quantizer = VAR_Q(
+        quant_bits=quant_bits,
+        qkv_format=qkv_format,
+        quant_method=quant_method,
+        kv_role=kv_role,
+        kivi_group_size=kivi_group_size,
+        kivi_cali_k_group_size=kivi_cali_k_group_size,
+        kivi_cali_v_group_size=kivi_cali_v_group_size,
+        compression_ratio=compression_ratio,
+        max_scale_seq_len=max_scale_seq_len,
+        pack_to_int32=pack_to_int32,
+        dequant_dtype=_dequant_dtype_name(dequant_dtype),
+    )
+    quantizer.quant(item)
+    return {
+        "packed": quantizer.quantized_item,
+        "scale": quantizer.scale,
+        "pack_meta": quantizer._pack_meta if pack_to_int32 else None,
+        "quant_meta": _clone_quant_meta(quantizer.quant_meta),
+    }
+
+
+def dequantize_tensor(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    pack_meta: Optional[Dict[str, int]],
+    dequant_dtype: str | torch.dtype,
+    quant_meta: Optional[Dict[str, Any]] = None,
+) -> torch.Tensor:
+    target_dtype = resolve_dequant_dtype(dequant_dtype)
+    if pack_meta is not None:
+        if packed.dtype != torch.int32:
+            raise ValueError(
+                f"Expected packed int32 tensor when pack_meta is present, got {packed.dtype}"
+            )
+        bits = int(pack_meta["bits"])
+        if _HAS_TRITON and packed.is_cuda and bits in TRITON_PACK_BITS:
+            q_int8 = unpack_last_dim_from_int32_triton(packed, pack_meta)
+        else:
+            q_int8 = unpack_last_dim_from_int32_python(packed, pack_meta)
+    else:
+        q_int8 = packed
+    if _is_compact_scale_meta(quant_meta):
+        scale = _expand_compact_scale_for_shape(scale, quant_meta, q_int8.shape)
+    return (q_int8.to(torch.float32) * scale).to(target_dtype)
+
+
+def build_kv_cache_quantizer(
+    quant_bits: int,
+    qkv_format: str,
+    quant_method: str,
+    kv_role: str = "k",
+    blk_idx: int = 0,
+    pack_to_int32: bool = True,
+    eps: float = 1e-12,
+    debug: bool = False,
+    rescale_qk: bool = False,
+    dequant_dtype: str = "bf16",
+    kivi_group_size: int = 128,
+    kivi_cali_k_group_size: int = 128,
+    kivi_cali_v_group_size: int = 128,
+    compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
+    max_scale_seq_len: Optional[int] = None,
+    **_ignored: Any,
+) -> "VAR_Q":
+    validate_quantization_args(
+        quant_bits=quant_bits,
+        qkv_format=qkv_format,
+        quant_method=quant_method,
+        pack_to_int32=pack_to_int32,
+        kv_role=kv_role,
+        kivi_group_size=kivi_group_size,
+        kivi_cali_k_group_size=kivi_cali_k_group_size,
+        kivi_cali_v_group_size=kivi_cali_v_group_size,
+        compression_ratio=compression_ratio,
+        max_scale_seq_len=max_scale_seq_len,
+    )
+    return VAR_Q(
+        quant_bits=quant_bits,
+        qkv_format=qkv_format,
+        quant_method=quant_method,
+        kv_role=kv_role,
+        kivi_group_size=kivi_group_size,
+        kivi_cali_k_group_size=kivi_cali_k_group_size,
+        kivi_cali_v_group_size=kivi_cali_v_group_size,
+        compression_ratio=compression_ratio,
+        max_scale_seq_len=max_scale_seq_len,
+        blk_idx=blk_idx,
+        pack_to_int32=pack_to_int32,
+        eps=eps,
+        debug=debug,
+        rescale_qk=rescale_qk,
+        dequant_dtype=dequant_dtype,
+    )
+
+
+ScaleId = Union[int, str]
+
+
+class InfinityStarVARQ:
+    """
+    VAR-Q adapter for InfinityStar-style KV cache lifecycle:
+    - cache per scale_id
+    - fetch selected ref scales by ref_sids
+    - optional concat with current kv tensor
+    """
+
+    def __init__(
+        self,
+        quant_bits: int = 8,
+        qkv_format: str = "BHLc",
+        quant_method: str = DEFAULT_QUANT_METHOD,
+        kv_role: str = "k",
+        kivi_group_size: int = 128,
+        pack_to_int32: bool = True,
+        eps: float = 1e-12,
+        debug: bool = False,
+        rescale_qk: bool = False,
+        dequant_dtype: str = "bf16",
+        compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
+        max_scale_seq_len: Optional[int] = None,
+    ):
+        self.quant_bits = quant_bits
+        self.qkv_format = qkv_format
+        self.quant_method = quant_method
+        self.kv_role = _normalize_kv_role(kv_role)
+        self.kivi_group_size = int(kivi_group_size)
+        self.pack_to_int32 = pack_to_int32
+        self.eps = eps
+        self.debug = debug
+        self.rescale_qk = rescale_qk
+        self.dequant_dtype = dequant_dtype
+        self.compression_ratio = float(compression_ratio)
+        self.max_scale_seq_len = int(max_scale_seq_len) if max_scale_seq_len is not None else None
+
+        self._scale_quantizers: Dict[ScaleId, VAR_Q] = {}
+
+    def _new_quantizer(self) -> VAR_Q:
+        return VAR_Q(
+            quant_bits=self.quant_bits,
+            qkv_format=self.qkv_format,
+            quant_method=self.quant_method,
+            kv_role=self.kv_role,
+            kivi_group_size=self.kivi_group_size,
+            pack_to_int32=self.pack_to_int32,
+            eps=self.eps,
+            debug=self.debug,
+            rescale_qk=self.rescale_qk,
+            dequant_dtype=self.dequant_dtype,
+            compression_ratio=self.compression_ratio,
+            max_scale_seq_len=self.max_scale_seq_len,
+        )
+
+    def _ensure_quantizer(self, scale_id: ScaleId) -> VAR_Q:
+        if scale_id not in self._scale_quantizers:
+            self._scale_quantizers[scale_id] = self._new_quantizer()
+        return self._scale_quantizers[scale_id]
+
+    @staticmethod
+    def _reset_quantizer_cache(q: VAR_Q) -> None:
+        q.cached_item = None
+        q.cached_scale = None
+        q.cached_quant_meta = None
+        q.quantized_item = None
+        q.scale = None
+        q.quant_meta = None
+        q._pack_meta = None
+        q._scale_L_counts = []
+        q._cur_scale_L_counts = []
+        q._cur_outlier_indices = None
+        q._cur_outlier_values = None
+        q.outlier_cached_indices = None
+        q.outlier_cached_values = None
+        q._L_offset = 0
+
+    def cache_scale(
+        self,
+        scale_id: ScaleId,
+        kv_tensor: torch.Tensor,
+        overwrite: bool = True,
+        return_dequant: bool = True,
+    ) -> Optional[torch.Tensor]:
+        """
+        Quantize and cache KV for one scale.
+        overwrite=True is usually what InfinityStar needs (one final KV per scale).
+        """
+        q = self._ensure_quantizer(scale_id)
+        if overwrite:
+            self._reset_quantizer_cache(q)
+        if return_dequant:
+            return q.use_var_q(kv_tensor)
+        q.quant_and_cache(kv_tensor)
+        return None
+
+    def has_scale(self, scale_id: ScaleId) -> bool:
+        q = self._scale_quantizers.get(scale_id)
+        return q is not None and q.cached_item is not None
+
+    def get_scale(self, scale_id: ScaleId) -> torch.Tensor:
+        q = self._scale_quantizers.get(scale_id)
+        if q is None or q.cached_item is None:
+            raise KeyError(f"scale_id={scale_id} is not cached")
+        return q.dequant_all()
+
+    def get_scale_quantized(self, scale_id: ScaleId):
+        """Return raw cached quantized tensor, scale tensor and pack meta for fused kernels."""
+        q = self._scale_quantizers.get(scale_id)
+        if q is None or q.cached_item is None or q.cached_scale is None:
+            raise KeyError(f"scale_id={scale_id} is not cached")
+        return q.cached_item, q.cached_scale, q._pack_meta
+
+    def get_selected(
+        self,
+        ref_scale_ids: Iterable[ScaleId],
+        current_kv: Optional[torch.Tensor] = None,
+        cat_dim: int = 2,
+    ) -> torch.Tensor:
+        """
+        Dequantize selected cached scales and concatenate them (plus optional current tensor).
+        """
+        tensors: List[torch.Tensor] = [self.get_scale(sid) for sid in ref_scale_ids]
+        if current_kv is not None:
+            tensors.append(current_kv)
+        if not tensors:
+            raise ValueError("No tensor to concatenate in get_selected()")
+        if len(tensors) == 1:
+            return tensors[0]
+        return torch.cat(tensors, dim=cat_dim)
+
+    def clear_scales(self, scale_ids: Iterable[ScaleId]) -> None:
+        for sid in scale_ids:
+            if sid in self._scale_quantizers:
+                del self._scale_quantizers[sid]
+
+    def clear_all(self) -> None:
+        self._scale_quantizers.clear()
+
+    def cache_bytes(self) -> Dict[str, int]:
+        packed_bytes = 0
+        scale_bytes = 0
+        for q in self._scale_quantizers.values():
+            if q.cached_item is not None:
+                packed_bytes += q.cached_item.numel() * q.cached_item.element_size()
+            if q.cached_scale is not None:
+                scale_bytes += q.cached_scale.numel() * q.cached_scale.element_size()
+        return {
+            "packed_bytes": packed_bytes,
+            "scale_bytes": scale_bytes,
+            "total_bytes": packed_bytes + scale_bytes,
+        }
+
+    def live_scale_ids(self) -> List[ScaleId]:
+        return sorted(list(self._scale_quantizers.keys()), key=lambda x: str(x))
+
+
+def build_infinitystar_cache_quantizer(
+    quant_bits: int,
+    qkv_format: str,
+    quant_method: str,
+    kv_role: str = "k",
+    kivi_group_size: int = 128,
+    pack_to_int32: bool = True,
+    eps: float = 1e-12,
+    debug: bool = False,
+    rescale_qk: bool = False,
+    dequant_dtype: str = "bf16",
+    compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
+    max_scale_seq_len: Optional[int] = None,
+    **_ignored: Any,
+) -> InfinityStarVARQ:
+    validate_quantization_args(
+        quant_bits=quant_bits,
+        qkv_format=qkv_format,
+        quant_method=quant_method,
+        pack_to_int32=pack_to_int32,
+        kv_role=kv_role,
+        kivi_group_size=kivi_group_size,
+        compression_ratio=compression_ratio,
+        max_scale_seq_len=max_scale_seq_len,
+    )
+    return InfinityStarVARQ(
+        quant_bits=quant_bits,
+        qkv_format=qkv_format,
+        quant_method=quant_method,
+        kv_role=kv_role,
+        kivi_group_size=kivi_group_size,
+        pack_to_int32=pack_to_int32,
+        eps=eps,
+        debug=debug,
+        rescale_qk=rescale_qk,
+        dequant_dtype=dequant_dtype,
+        compression_ratio=compression_ratio,
+        max_scale_seq_len=max_scale_seq_len,
+    )
+
+
+HAS_TRITON_PACK = _HAS_TRITON
 
 if __name__ == "__main__":
     import time, torch
