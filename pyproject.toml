@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "VAR-Q"
+version = "0.1.0"
+description = "Runtime KV-cache quantization for visual autoregressive generation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "VAR-Q Authors" },
+]
+dependencies = [
+  "torch",
+  "triton",
+  "numpy",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+
+[project.urls]
+Homepage = "https://github.com/VAR-Q/VAR-Q"
+Documentation = "https://github.com/VAR-Q/VAR-Q#readme"
+Issues = "https://github.com/VAR-Q/VAR-Q/issues"
+
+[tool.setuptools.packages.find]
+include = ["VAR_Q*", "ablation*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

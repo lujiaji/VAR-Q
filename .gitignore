@@ -13,7 +13,11 @@ Benchmark/latency/
 Benchmark/lower_metrics/
 Benchmark/MovieGen/
 temp/
-tests/
+tests/output/
+tests/tmp/
+tests/**/output/
+tests/**/tmp/
+tests/**/*.log
 third_party/*
 !third_party/README.md
 scripts/output/
@@ -29,6 +33,9 @@ weights/
 __pycache__
 **/__pycache__/**
 **/.ipynb_checkpoints/**
+*.egg-info/
+build/
+dist/
 recon_B3HW.png
 **/*.jpg
 **/*.png
