@@ -7,6 +7,32 @@ It reduces inference-time KV-cache memory while preserving generation quality, a
   <img src="assets/VAR-Q-performance.png" alt="VAR-Q performance summary" width="820">
 </p>
 
+## ⚡ Quick Start in 60 Seconds
+
+This smoke path does not require third-party backends, checkpoints, or datasets.
+
+```bash
+git clone <this-repo-url> VAR-Q
+cd VAR-Q
+pip install -e .
+python examples/smoke_quant_roundtrip.py
+python examples/smoke_pack_unpack.py
+python examples/smoke_hook_mock_attention.py
+```
+
+For development checks:
+
+```bash
+pip install -e ".[dev]"
+pytest tests/
+```
+
+## 🎯 Scope
+
+VAR-Q is a **runtime KV-cache quantization** method for visual autoregressive generation. It quantizes K/V cache tensors created during inference; it is not a weight-only quantization method.
+
+Weight quantization methods such as GPTQ, AWQ, and related approaches are orthogonal to VAR-Q. In principle, a backend can combine weight-only quantization for model parameters with VAR-Q for runtime KV-cache memory.
+
 ## ✨ Highlights
 
 - **Runtime hook integration**: VAR-Q is installed in memory after a backend model is built; users do not need to patch third-party repositories.
@@ -40,13 +66,17 @@ VAR-Q/
 ├── ablation/               # KIVI / FLexGen / KVQuant implementations
 ├── Benchmark/              # Public evaluation entrypoints
 ├── configs/                # Curated JSON configs
+├── docs/                   # Public documentation
+├── examples/               # No-checkpoint smoke demos
 ├── scripts/                # Public inference and evaluation launchers
+├── tests/                  # Lightweight public smoke tests
 ├── third_party/README.md   # Upstream checkout instructions
 ├── requirements-varq.txt   # Lightweight VAR-Q convenience environment
+├── pyproject.toml          # Editable install metadata
 └── LICENSE
 ```
 
-Ignored local-only paths include `third_party/`, `tests/`, `temp/`, benchmark outputs, model weights, and generated images/videos.
+Ignored local-only paths include `third_party/`, `temp/`, benchmark outputs, model weights, generated media, and test output/tmp directories. The lightweight `tests/` suite is part of the public repository.
 
 ## 🚀 Installation
 
@@ -61,10 +91,25 @@ Install the third-party backend environment from its official repository first. 
 
 ```bash
 conda activate <your-backend-env>
+pip install -e .
+```
+
+For a non-editable minimal dependency install, `requirements-varq.txt` is also retained:
+
+```bash
 pip install -r requirements-varq.txt
 ```
 
 VAR-Q itself only needs lightweight PyTorch/Triton-compatible tensor support. VAR, Infinity, InfinityStar, Self-Forcing, and LongLive may pin different CUDA, PyTorch, `flash-attn`, `xformers`, tokenizer, or evaluation package versions; those requirements belong to the official upstream repositories, not to VAR-Q.
+
+## 🧪 Tested Environments
+
+| Component | Environment | Notes |
+| --- | --- | --- |
+| VAR-Q core smoke tests | Python 3.10, PyTorch, Triton | CPU works for public tests; CUDA is used when available. |
+| VAR / Infinity / InfinityStar | Follow official backend environments | Install VAR-Q with `pip install -e .` inside the backend env. |
+| Self-Forcing / LongLive | Follow official backend environments | Video stacks may require separate CUDA/PyTorch package sets. |
+| CI | Ubuntu latest, Python 3.10 | Runs only py_compile and public smoke tests. |
 
 ## 🧱 Third-Party Models
 
@@ -81,6 +126,8 @@ git clone https://github.com/NVlabs/LongLive third_party/LongLive
 No `git apply`, patch marker, or source edit is required. Runtime entrypoints load the third-party model, call `install_varq_hooks(...)`, and then run the backend's normal inference path.
 
 Checkpoints are intentionally not stored in JSON configs. Provide them through command-line arguments, environment variables, or the upstream backend's native loader.
+
+Third-party backends, checkpoints, datasets, and generated assets are not distributed with this repository. They are governed by their own licenses and usage terms.
 
 ## 🪝 Runtime Hook API
 
@@ -188,6 +235,8 @@ configs/<backend>/<family>/<topic>/*.json
 
 The `quantization` block is intentionally backend-agnostic and can be reused when calling `install_varq_hooks(...)` directly. Full JSON files are still kept per backend because model loaders use different `qkv_format`, sequence layout, image/video schedule, and grouping defaults.
 
+See [docs/configs.md](docs/configs.md) for a concise field reference.
+
 Retained public configs include:
 
 | Backend | VAR-Q configs | Ablation configs | Extra configs |
@@ -202,15 +251,14 @@ For next-frame video backends such as Self-Forcing and LongLive, `max_scale_seq_
 
 ## ✅ Development Checks
 
-Local tests are kept in ignored `tests/` and are not part of the public package surface:
+Lightweight tests are public and do not require third-party model repositories, checkpoints, or datasets:
 
 ```bash
-python -m unittest discover -s tests -p 'test_runtime_hooks.py'
-python -m unittest discover -s tests -p 'test_quant_boundaries.py'
 python -m py_compile VAR_Q/*.py VAR_Q/hooks/*.py ablation/*.py scripts/*.py
+pytest tests/
 ```
 
-The smoke tests instantiate clean upstream-style attention modules and verify that VAR-Q can attach without changing third-party source files.
+The smoke tests cover pack/unpack, quant/dequant shape checks, config loading, and mock runtime hook installation/removal.
 
 ## 🗺️ TODO
 

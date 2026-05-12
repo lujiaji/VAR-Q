@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use VAR-Q in your research, please cite this project. The formal paper citation will be updated after publication."
+title: "VAR-Q: KV-Cache Quantization for Visual Autoregressive Generation"
+authors:
+  - name: "VAR-Q Authors"
+version: "0.1.0"
+date-released: "2026-05-12"
+license: "MIT"
+repository-code: "https://github.com/VAR-Q/VAR-Q"
+abstract: "VAR-Q is a runtime KV-cache quantization method for efficient visual autoregressive generation."
