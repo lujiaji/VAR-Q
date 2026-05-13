@@ -159,9 +159,6 @@ class VAR_Q:
         qkv_format: str = 'BLHc',  # (B,L,H,c) or (B,H,L,c)
         quant_method: str = DEFAULT_QUANT_METHOD,
         kv_role: str = "k",
-        kivi_group_size: int = 128,
-        kivi_cali_k_group_size: int = 128,
-        kivi_cali_v_group_size: int = 128,
         compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
         max_scale_seq_len: Optional[int] = None,
         blk_idx: int = 0,
@@ -170,9 +167,6 @@ class VAR_Q:
         debug: bool = False,
         rescale_qk = False,
         dequant_dtype: str = "bf16",
-        outlier_ratio: float = 0.0,
-        outlier_mode: str = 'ratio',
-        outlier_n_sigma: float = 3.0,
     ):
         assert qkv_format in ('BLHc','BHLc'), f"Invalid qkv_format: {qkv_format}"
         quant_method = normalize_quant_method(quant_method)
@@ -192,14 +186,9 @@ class VAR_Q:
             raise ValueError(
                 f"max_scale_seq_len must be positive when provided, got {max_scale_seq_len}"
             )
-        assert outlier_mode in ('ratio', 'sigma'), f"Invalid outlier_mode: {outlier_mode}"
         self.quant_bits = quant_bits
         self.quant_method = quant_method
         self.kv_role = kv_role
-        # Retained only for call-site compatibility with older integrations.
-        self.kivi_group_size = int(kivi_group_size)
-        self.kivi_cali_k_group_size = int(kivi_cali_k_group_size)
-        self.kivi_cali_v_group_size = int(kivi_cali_v_group_size)
         self.compression_ratio = float(compression_ratio)
         self.max_scale_seq_len = int(max_scale_seq_len) if max_scale_seq_len is not None else None
         self.cur_blk_idx = blk_idx
@@ -242,19 +231,6 @@ class VAR_Q:
 
         # pack/unpack meta (assuming c is constant across steps, so meta is constant)
         self._pack_meta: Optional[Dict[str,int]] = None  # {'orig_c','vals_per_word','pad_len','bits'}
-
-        # Outlier preservation (KVQuant-style sparse storage)
-        self.outlier_ratio = outlier_ratio
-        self.outlier_mode = outlier_mode
-        self.outlier_n_sigma = outlier_n_sigma
-        self._outlier_enabled = outlier_ratio > 0.0
-        # Current step outlier
-        self._cur_outlier_indices: Optional[torch.Tensor] = None   # (N, 4) int32
-        self._cur_outlier_values: Optional[torch.Tensor] = None    # (N,) bf16
-        # Cached outlier across all steps
-        self.outlier_cached_indices: Optional[torch.Tensor] = None # (M, 4) int32
-        self.outlier_cached_values: Optional[torch.Tensor] = None  # (M,) bf16
-        self._L_offset: int = 0
 
         # Per-step token counts for compact-scale methods
         # (G_SCALE_HEAD_DIM, VARQ, G_SCALE, G_TENSOR).
@@ -448,7 +424,6 @@ class VAR_Q:
         self.cached_scale_len = 0
         self.cached_quant_meta = None
         self._scale_L_counts = []
-        self._L_offset = 0
 
     def _snapshot_cache_state(self) -> Dict[str, Any]:
         return {
@@ -456,10 +431,6 @@ class VAR_Q:
             "cached_scale_len": self.cached_scale_len,
             "cached_quant_meta": _clone_quant_meta(self.cached_quant_meta),
             "scale_L_counts": list(self._scale_L_counts),
-            "L_offset": self._L_offset,
-            "outlier_cached_len": 0
-            if self.outlier_cached_indices is None
-            else int(self.outlier_cached_indices.size(0)),
         }
 
     def _restore_cache_state(self, state: Dict[str, Any]) -> None:
@@ -467,14 +438,6 @@ class VAR_Q:
         self.cached_scale_len = int(state["cached_scale_len"])
         self.cached_quant_meta = _clone_quant_meta(state["cached_quant_meta"])
         self._scale_L_counts = list(state["scale_L_counts"])
-        self._L_offset = int(state["L_offset"])
-        outlier_len = int(state.get("outlier_cached_len", 0))
-        if self.outlier_cached_indices is not None:
-            self.outlier_cached_indices = self.outlier_cached_indices[:outlier_len]
-            self.outlier_cached_values = self.outlier_cached_values[:outlier_len]
-            if outlier_len == 0:
-                self.outlier_cached_indices = None
-                self.outlier_cached_values = None
 
     def _ensure_dequant_workspace(self, q_int8: torch.Tensor) -> torch.Tensor:
         needed = int(q_int8.size(self.dim_cat))
@@ -558,45 +521,6 @@ class VAR_Q:
         else:
             return unpack_last_dim_from_int32_python(packed, meta)
 
-    # ---------- Outlier extraction (KVQuant-style) ----------
-    def _extract_outliers(self, item: torch.Tensor) -> torch.Tensor:
-        """Extract outliers from item, store them sparsely, zero-out in-place copy. Returns modified item."""
-        if not self._outlier_enabled:
-            self._cur_outlier_indices = None
-            self._cur_outlier_values = None
-            return item
-
-        abs_vals = item.abs().float()
-
-        if self.outlier_mode == 'ratio':
-            numel = abs_vals.numel()
-            k = max(1, int(numel * self.outlier_ratio))
-            threshold = abs_vals.reshape(-1).topk(k).values[-1]
-            outlier_mask = abs_vals >= threshold
-        else:  # 'sigma'
-            mean_val = abs_vals.mean()
-            std_val = abs_vals.std()
-            outlier_mask = abs_vals >= (mean_val + self.outlier_n_sigma * std_val)
-
-        if outlier_mask.any():
-            indices = torch.nonzero(outlier_mask, as_tuple=False).to(torch.int32)  # (N, 4)
-            item = item.clone()
-            values = item[outlier_mask].to(torch.bfloat16)
-            item[outlier_mask] = 0.0
-            self._cur_outlier_indices = indices
-            self._cur_outlier_values = values
-        else:
-            self._cur_outlier_indices = None
-            self._cur_outlier_values = None
-
-        return item
-
-    def _scatter_outliers(self, result: torch.Tensor, indices: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
-        """Write outlier values back into the dequantized tensor."""
-        idx = indices.long().unbind(1)
-        result[idx[0], idx[1], idx[2], idx[3]] = values.to(result.dtype)
-        return result
-
     # ---------- Main quantization process ----------
     def quant(self, item: torch.Tensor):
         m = self.quant_method
@@ -604,9 +528,6 @@ class VAR_Q:
         self._replace_cache_on_next_cache = False
         self._cur_scale_L_counts = []
         red = self.dim_map[m]
-
-        # Extract and zero-out outliers before quantization
-        item = self._extract_outliers(item)
 
         if m in ('VARQ', 'G_SCALE_HEAD_DIM', 'G_TOKEN', 'G_TOKEN_HEAD', 'G_SCALE'):
             if m in ('VARQ', 'G_SCALE_HEAD_DIM', 'G_SCALE') and (self.compression_ratio < 1.0 or self.max_scale_seq_len is not None):
@@ -691,32 +612,6 @@ class VAR_Q:
         else:
             raise ValueError(f"[VAR-Q]: Invalid quantization method: {m}")
 
-        # Cache outlier indices and values (sparse)
-        if self._outlier_enabled:
-            self._cache_outliers(q_cur)
-
-    def _cache_outliers(self, q_cur: torch.Tensor):
-        """Append current-step outliers to the cached sparse storage with L-offset."""
-        L_dim_idx = 1 if self.qkv_format == 'BLHc' else 2
-        L_new = q_cur.size(L_dim_idx)
-
-        if self._cur_outlier_indices is not None and self._cur_outlier_indices.numel() > 0:
-            shifted = self._cur_outlier_indices.clone()
-            shifted[:, L_dim_idx] += self._L_offset
-            if self.outlier_cached_indices is None:
-                self.outlier_cached_indices = shifted
-                self.outlier_cached_values = self._cur_outlier_values
-            else:
-                self.outlier_cached_indices = torch.cat([self.outlier_cached_indices, shifted], dim=0)
-                self.outlier_cached_values = torch.cat([self.outlier_cached_values, self._cur_outlier_values], dim=0)
-
-        if self.quant_method not in ('G_HEAD_DIM',):
-            self._L_offset += L_new
-        else:
-            self._L_offset = 0
-            self.outlier_cached_indices = None
-            self.outlier_cached_values = None
-
     # ---------- Dequantization ----------
     def dequant_current(self) -> torch.Tensor:
         if self.pack_to_int32:
@@ -729,10 +624,7 @@ class VAR_Q:
         if self.quant_method in self._COMPACT_SCALE_METHODS and scale.size(self.dim_cat) < q_int8.size(self.dim_cat):
             quant_meta = quant_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
             quant_meta["group_lengths"] = list(self._cur_scale_L_counts or [q_int8.size(self.dim_cat)])
-        result = self._write_dequant_into_workspace(q_int8, scale, quant_meta)
-        if self._cur_outlier_indices is not None:
-            result = self._scatter_outliers(result, self._cur_outlier_indices, self._cur_outlier_values)
-        return result
+        return self._write_dequant_into_workspace(q_int8, scale, quant_meta)
 
     def dequant_all(self) -> torch.Tensor:
         if self.cached_item is None or self.cached_len == 0:
@@ -750,10 +642,7 @@ class VAR_Q:
         if self.quant_method in self._COMPACT_SCALE_METHODS and scale.size(self.dim_cat) < q_int8.size(self.dim_cat):
             quant_meta = quant_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
             quant_meta["group_lengths"] = list(self._scale_L_counts)
-        result = self._write_dequant_into_workspace(q_int8, scale, quant_meta)
-        if self.outlier_cached_indices is not None:
-            result = self._scatter_outliers(result, self.outlier_cached_indices, self.outlier_cached_values)
-        return result
+        return self._write_dequant_into_workspace(q_int8, scale, quant_meta)
 
     # Main external interface
     def quant_and_cache(self, item: torch.Tensor):
@@ -899,9 +788,6 @@ def validate_quantization_args(
     quant_method: str,
     pack_to_int32: bool,
     kv_role: str = "k",
-    kivi_group_size: int = 128,
-    kivi_cali_k_group_size: int = 128,
-    kivi_cali_v_group_size: int = 128,
     compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
     max_scale_seq_len: Optional[int] = None,
 ) -> None:
@@ -941,11 +827,9 @@ def quantize_tensor(
     pack_to_int32: bool,
     dequant_dtype: str | torch.dtype,
     kv_role: str = "k",
-    kivi_group_size: int = 128,
-    kivi_cali_k_group_size: int = 128,
-    kivi_cali_v_group_size: int = 128,
     compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
     max_scale_seq_len: Optional[int] = None,
+    **_ignored: Any,
 ) -> Dict[str, Any]:
     validate_quantization_args(
         quant_bits=quant_bits,
@@ -953,9 +837,6 @@ def quantize_tensor(
         quant_method=quant_method,
         pack_to_int32=pack_to_int32,
         kv_role=kv_role,
-        kivi_group_size=kivi_group_size,
-        kivi_cali_k_group_size=kivi_cali_k_group_size,
-        kivi_cali_v_group_size=kivi_cali_v_group_size,
         compression_ratio=compression_ratio,
         max_scale_seq_len=max_scale_seq_len,
     )
@@ -964,9 +845,6 @@ def quantize_tensor(
         qkv_format=qkv_format,
         quant_method=quant_method,
         kv_role=kv_role,
-        kivi_group_size=kivi_group_size,
-        kivi_cali_k_group_size=kivi_cali_k_group_size,
-        kivi_cali_v_group_size=kivi_cali_v_group_size,
         compression_ratio=compression_ratio,
         max_scale_seq_len=max_scale_seq_len,
         pack_to_int32=pack_to_int32,
@@ -1017,9 +895,6 @@ def build_kv_cache_quantizer(
     debug: bool = False,
     rescale_qk: bool = False,
     dequant_dtype: str = "bf16",
-    kivi_group_size: int = 128,
-    kivi_cali_k_group_size: int = 128,
-    kivi_cali_v_group_size: int = 128,
     compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
     max_scale_seq_len: Optional[int] = None,
     **_ignored: Any,
@@ -1030,9 +905,6 @@ def build_kv_cache_quantizer(
         quant_method=quant_method,
         pack_to_int32=pack_to_int32,
         kv_role=kv_role,
-        kivi_group_size=kivi_group_size,
-        kivi_cali_k_group_size=kivi_cali_k_group_size,
-        kivi_cali_v_group_size=kivi_cali_v_group_size,
         compression_ratio=compression_ratio,
         max_scale_seq_len=max_scale_seq_len,
     )
@@ -1041,9 +913,6 @@ def build_kv_cache_quantizer(
         qkv_format=qkv_format,
         quant_method=quant_method,
         kv_role=kv_role,
-        kivi_group_size=kivi_group_size,
-        kivi_cali_k_group_size=kivi_cali_k_group_size,
-        kivi_cali_v_group_size=kivi_cali_v_group_size,
         compression_ratio=compression_ratio,
         max_scale_seq_len=max_scale_seq_len,
         blk_idx=blk_idx,
@@ -1072,7 +941,6 @@ class InfinityStarVARQ:
         qkv_format: str = "BHLc",
         quant_method: str = DEFAULT_QUANT_METHOD,
         kv_role: str = "k",
-        kivi_group_size: int = 128,
         pack_to_int32: bool = True,
         eps: float = 1e-12,
         debug: bool = False,
@@ -1085,7 +953,6 @@ class InfinityStarVARQ:
         self.qkv_format = qkv_format
         self.quant_method = quant_method
         self.kv_role = _normalize_kv_role(kv_role)
-        self.kivi_group_size = int(kivi_group_size)
         self.pack_to_int32 = pack_to_int32
         self.eps = eps
         self.debug = debug
@@ -1102,7 +969,6 @@ class InfinityStarVARQ:
             qkv_format=self.qkv_format,
             quant_method=self.quant_method,
             kv_role=self.kv_role,
-            kivi_group_size=self.kivi_group_size,
             pack_to_int32=self.pack_to_int32,
             eps=self.eps,
             debug=self.debug,
@@ -1125,10 +991,6 @@ class InfinityStarVARQ:
         q.quant_meta = None
         q._pack_meta = None
         q._cur_scale_L_counts = []
-        q._cur_outlier_indices = None
-        q._cur_outlier_values = None
-        q.outlier_cached_indices = None
-        q.outlier_cached_values = None
 
     def cache_scale(
         self,
@@ -1222,7 +1084,6 @@ def build_infinitystar_cache_quantizer(
     qkv_format: str,
     quant_method: str,
     kv_role: str = "k",
-    kivi_group_size: int = 128,
     pack_to_int32: bool = True,
     eps: float = 1e-12,
     debug: bool = False,
@@ -1238,7 +1099,6 @@ def build_infinitystar_cache_quantizer(
         quant_method=quant_method,
         pack_to_int32=pack_to_int32,
         kv_role=kv_role,
-        kivi_group_size=kivi_group_size,
         compression_ratio=compression_ratio,
         max_scale_seq_len=max_scale_seq_len,
     )
@@ -1247,7 +1107,6 @@ def build_infinitystar_cache_quantizer(
         qkv_format=qkv_format,
         quant_method=quant_method,
         kv_role=kv_role,
-        kivi_group_size=kivi_group_size,
         pack_to_int32=pack_to_int32,
         eps=eps,
         debug=debug,

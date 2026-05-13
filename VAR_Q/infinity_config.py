@@ -41,9 +41,6 @@ def apply_infinity_config(args: argparse.Namespace) -> Tuple[Dict[str, Any], Dic
     args.max_scale_seq_len = int(quant_config.get("max_scale_seq_len", 0) or 0)
     args.rescale_qk = int(bool(quant_config.get("rescale_qk", False)))
     args.enable_fused_kv_flashattn = int(bool(quant_config.get("enable_fused_kv_flashattn", False)))
-    args.outlier_ratio = float(quant_config.get("outlier_ratio", 0.0))
-    args.outlier_mode = quant_config.get("outlier_mode", "ratio")
-    args.outlier_n_sigma = float(quant_config.get("outlier_n_sigma", 3.0))
     args.ablation_config = ablation_config
 
     if "cfg" in inference_config:

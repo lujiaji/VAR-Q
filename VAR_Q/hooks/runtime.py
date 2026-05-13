@@ -181,9 +181,6 @@ def _ensure_kv_quantizers(module: nn.Module, qkv_format: str) -> None:
         max_scale_seq_len=_max_scale_seq_len(module),
         rescale_qk=bool(getattr(module, "rescale_qk", False)),
         debug=bool(getattr(module, "debug_memory", False)),
-        outlier_ratio=float(getattr(module, "outlier_ratio", 0.0)),
-        outlier_mode=str(getattr(module, "outlier_mode", "ratio")),
-        outlier_n_sigma=float(getattr(module, "outlier_n_sigma", 3.0)),
         ablation_config=getattr(module, "ablation_config", None),
     )
     module.v_quant = _build_kv_cache_quantizer(
@@ -200,9 +197,6 @@ def _ensure_kv_quantizers(module: nn.Module, qkv_format: str) -> None:
         max_scale_seq_len=_max_scale_seq_len(module),
         rescale_qk=bool(getattr(module, "rescale_qk", False)),
         debug=bool(getattr(module, "debug_memory", False)),
-        outlier_ratio=float(getattr(module, "outlier_ratio", 0.0)),
-        outlier_mode=str(getattr(module, "outlier_mode", "ratio")),
-        outlier_n_sigma=float(getattr(module, "outlier_n_sigma", 3.0)),
         ablation_config=getattr(module, "ablation_config", None),
     )
 
@@ -676,9 +670,6 @@ def _configure_attention(
         "skip_cache_last_scale": bool(cfg.get("skip_cache_last_scale", model_type in ("var", "infinity", "infinitystar"))),
         "release_cuda_cache_after_scale": bool(cfg.get("release_cuda_cache_after_scale", True)),
         "enable_fused_kv_flashattn": bool(cfg.get("enable_fused_kv_flashattn", False)),
-        "outlier_ratio": float(cfg.get("outlier_ratio", 0.0)),
-        "outlier_mode": str(cfg.get("outlier_mode", "ratio")),
-        "outlier_n_sigma": float(cfg.get("outlier_n_sigma", 3.0)),
         "debug_memory": bool(cfg.get("debug_memory", cfg.get("profile_memory", False))),
         "ablation_config": dict(ablation_config or {}),
         "block_idx": int(getattr(module, "block_idx", block_idx)),
@@ -783,9 +774,6 @@ def _wrap_kv_caching(handle: HookHandle, module: nn.Module, model_type: str) -> 
                 max_scale_seq_len=(int(getattr(self, "max_scale_seq_len", 0)) or None),
                 rescale_qk=bool(getattr(self, "rescale_qk", False)),
                 debug=bool(getattr(self, "debug_memory", False)),
-                outlier_ratio=float(getattr(self, "outlier_ratio", 0.0)),
-                outlier_mode=str(getattr(self, "outlier_mode", "ratio")),
-                outlier_n_sigma=float(getattr(self, "outlier_n_sigma", 3.0)),
                 ablation_config=getattr(self, "ablation_config", None),
             )
             self.v_quant = _build_kv_cache_quantizer(
@@ -802,9 +790,6 @@ def _wrap_kv_caching(handle: HookHandle, module: nn.Module, model_type: str) -> 
                 max_scale_seq_len=(int(getattr(self, "max_scale_seq_len", 0)) or None),
                 rescale_qk=bool(getattr(self, "rescale_qk", False)),
                 debug=bool(getattr(self, "debug_memory", False)),
-                outlier_ratio=float(getattr(self, "outlier_ratio", 0.0)),
-                outlier_mode=str(getattr(self, "outlier_mode", "ratio")),
-                outlier_n_sigma=float(getattr(self, "outlier_n_sigma", 3.0)),
                 ablation_config=getattr(self, "ablation_config", None),
             )
         return result

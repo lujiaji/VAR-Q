@@ -87,9 +87,6 @@ class VideoKVCacheAdapter:
             max_scale_seq_len=int(cfg.get("max_scale_seq_len", 1560)) or None,
             rescale_qk=bool(cfg.get("rescale_qk", False)),
             debug=bool(cfg.get("debug_memory", cfg.get("profile_memory", False))),
-            outlier_ratio=float(cfg.get("outlier_ratio", 0.0)),
-            outlier_mode=str(cfg.get("outlier_mode", "ratio")),
-            outlier_n_sigma=float(cfg.get("outlier_n_sigma", 3.0)),
             ablation_config=self.ablation_config,
             dequant_dtype=str(cfg.get("dequant_dtype", "bf16")),
         )
