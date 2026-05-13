@@ -14,8 +14,18 @@ from VAR_Q import build_kv_cache_quantizer as build_varq_kv_cache_quantizer
 from VAR_Q.config_loader import _normalize_quant_method_name
 
 
-SUPPORTED_MODEL_TYPES = ("var", "infinity", "infinitystar")
+SUPPORTED_MODEL_TYPES = ("var", "infinity", "infinitystar", "self_forcing", "longlive", "generic_video")
 _PACKABLE_BITS = (2, 3, 4, 6, 8)
+_ABLATION_METHOD_NAMES = {
+    "KIVI",
+    "KIVI-CALI",
+    "FLEXGEN",
+    "KVQUANT",
+    "ABL_KIVI",
+    "ABL_KIVI_CALI",
+    "ABL_KV_FLEXGEN",
+    "ABL_KVQUANT",
+}
 
 
 @dataclass
@@ -44,8 +54,8 @@ def _get_ablation_api() -> Tuple[Callable[..., Any], Callable[..., Any], Callabl
 
 
 def _is_ablation_method(quant_method: str) -> bool:
-    _, _, is_ablation = _get_ablation_api()
-    return bool(is_ablation(str(quant_method)))
+    normalized = _normalize_quant_method_name(str(quant_method))
+    return normalized.upper() in _ABLATION_METHOD_NAMES
 
 
 def _build_kv_cache_quantizer(**kwargs: Any) -> Any:
@@ -108,6 +118,11 @@ def _role_pack(cfg: Dict[str, Any], role: str) -> bool:
 
 
 def _iter_attention_modules(model: nn.Module, model_type: str) -> Iterable[Tuple[str, nn.Module]]:
+    if model_type in ("self_forcing", "longlive", "generic_video"):
+        # Generic video backends should use VideoKVCacheAdapter inside their
+        # attention implementation. Automatic wrapping is intentionally limited
+        # to known attention signatures to avoid silently changing semantics.
+        return
     for name, module in model.named_modules():
         cls_name = module.__class__.__name__
         if cls_name != "SelfAttention":
@@ -165,6 +180,7 @@ def _ensure_kv_quantizers(module: nn.Module, qkv_format: str) -> None:
         compression_ratio=float(getattr(module, "compression_ratio", 1.0)),
         max_scale_seq_len=_max_scale_seq_len(module),
         rescale_qk=bool(getattr(module, "rescale_qk", False)),
+        debug=bool(getattr(module, "debug_memory", False)),
         outlier_ratio=float(getattr(module, "outlier_ratio", 0.0)),
         outlier_mode=str(getattr(module, "outlier_mode", "ratio")),
         outlier_n_sigma=float(getattr(module, "outlier_n_sigma", 3.0)),
@@ -183,6 +199,7 @@ def _ensure_kv_quantizers(module: nn.Module, qkv_format: str) -> None:
         compression_ratio=float(getattr(module, "compression_ratio", 1.0)),
         max_scale_seq_len=_max_scale_seq_len(module),
         rescale_qk=bool(getattr(module, "rescale_qk", False)),
+        debug=bool(getattr(module, "debug_memory", False)),
         outlier_ratio=float(getattr(module, "outlier_ratio", 0.0)),
         outlier_mode=str(getattr(module, "outlier_mode", "ratio")),
         outlier_n_sigma=float(getattr(module, "outlier_n_sigma", 3.0)),
@@ -204,11 +221,50 @@ def _ensure_infinitystar_quantizers(module: nn.Module) -> None:
         compression_ratio=float(getattr(module, "compression_ratio", 1.0)),
         max_scale_seq_len=_max_scale_seq_len(module),
         rescale_qk=bool(getattr(module, "rescale_qk", False)),
+        debug=bool(getattr(module, "debug_memory", False)),
         dequant_dtype="bf16",
         ablation_config=getattr(module, "ablation_config", None),
     )
     module.k_varq = _build_infinitystar_cache_quantizer(kv_role="k", **common)
     module.v_varq = _build_infinitystar_cache_quantizer(kv_role="v", **common)
+
+
+def _release_attention_dequant_workspaces(module: nn.Module) -> None:
+    for attr in ("k_quant", "v_quant"):
+        quantizer = getattr(module, attr, None)
+        if quantizer is not None and hasattr(quantizer, "release_dequant_workspace"):
+            quantizer.release_dequant_workspace()
+
+
+def _maybe_empty_cuda_cache_after_scale(module: nn.Module) -> None:
+    if not bool(getattr(module, "release_cuda_cache_after_scale", True)):
+        return
+    if int(getattr(module, "_varq_hook_order_idx", -1)) != int(getattr(module, "_varq_last_attention_order_idx", -2)):
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _use_quantizer(quantizer: Any, item: torch.Tensor, cache_current: bool) -> torch.Tensor:
+    try:
+        return quantizer.use_var_q(item, cache_current=cache_current)
+    except TypeError:
+        return quantizer.use_var_q(item)
+
+
+def _var_is_last_scale(module: nn.Module, current_len: int) -> bool:
+    return bool(getattr(module, "skip_cache_last_scale", True)) and int(
+        getattr(module, "last_scale_seq_len", 0) or 0
+    ) == int(current_len)
+
+
+def _infinity_is_last_scale(module: nn.Module, scale_schedule: Any, scale_ind: int) -> bool:
+    return (
+        bool(getattr(module, "skip_cache_last_scale", True))
+        and scale_schedule is not None
+        and isinstance(scale_ind, int)
+        and scale_ind == len(scale_schedule) - 1
+    )
 
 
 def _attention_enabled(module: nn.Module) -> bool:
@@ -242,6 +298,7 @@ def _wrap_var_forward(handle: HookHandle, module: nn.Module) -> None:
             return original(x, attn_bias)
 
         B, L, C = x.shape
+        cache_current = not _var_is_last_scale(self, L)
         qkv = F.linear(
             input=x,
             weight=self.mat_qkv.weight,
@@ -254,29 +311,34 @@ def _wrap_var_forward(handle: HookHandle, module: nn.Module) -> None:
             qkv_format = "BLHc"
             if getattr(self, "attn_l2_norm", False):
                 scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
+                scale_mul = scale_mul.transpose(1, 2)
                 q = F.normalize(q, dim=-1).mul(scale_mul)
                 k = F.normalize(k, dim=-1)
             _ensure_kv_quantizers(self, qkv_format)
             if bool(getattr(self, "rescale_qk", False)):
                 q, k = self.k_quant.rescale_qk(q, k)
-            k = self.k_quant.use_var_q(k).to(q.dtype).contiguous()
-            v = self.v_quant.use_var_q(v).to(q.dtype).contiguous()
+            k = _use_quantizer(self.k_quant, k, cache_current).to(q.dtype).contiguous()
+            v = _use_quantizer(self.v_quant, v, cache_current).to(q.dtype).contiguous()
             flash_attn_func = globals_dict.get("flash_attn_func")
             if flash_attn_func is None:
                 raise RuntimeError("flash_attn_func is not available in the third-party VAR runtime.")
-            oup = flash_attn_func(q.to(main_type), k.to(main_type), v.to(main_type), dropout_p=0, softmax_scale=self.scale).view(B, L, C)
+            oup = flash_attn_func(q.to(main_type), k.to(main_type), v.to(main_type), dropout_p=0, softmax_scale=self.scale)
+            if oup.shape[1] != L:
+                oup = oup[:, -L:]
+            oup = oup.reshape(B, L, C)
         elif getattr(self, "using_xform", False):
             q, k, v = qkv.unbind(dim=2)
             qkv_format = "BLHc"
             if getattr(self, "attn_l2_norm", False):
                 scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
+                scale_mul = scale_mul.transpose(1, 2)
                 q = F.normalize(q, dim=-1).mul(scale_mul)
                 k = F.normalize(k, dim=-1)
             _ensure_kv_quantizers(self, qkv_format)
             if bool(getattr(self, "rescale_qk", False)):
                 q, k = self.k_quant.rescale_qk(q, k)
-            k = self.k_quant.use_var_q(k).to(q.dtype).contiguous()
-            v = self.v_quant.use_var_q(v).to(q.dtype).contiguous()
+            k = _use_quantizer(self.k_quant, k, cache_current).to(q.dtype).contiguous()
+            v = _use_quantizer(self.v_quant, v, cache_current).to(q.dtype).contiguous()
             memory_efficient_attention = globals_dict.get("memory_efficient_attention")
             if memory_efficient_attention is None:
                 raise RuntimeError("memory_efficient_attention is not available in the third-party VAR runtime.")
@@ -292,10 +354,13 @@ def _wrap_var_forward(handle: HookHandle, module: nn.Module) -> None:
             _ensure_kv_quantizers(self, qkv_format)
             if bool(getattr(self, "rescale_qk", False)):
                 q, k = self.k_quant.rescale_qk(q, k)
-            k = self.k_quant.use_var_q(k).to(q.dtype).contiguous()
-            v = self.v_quant.use_var_q(v).to(q.dtype).contiguous()
+            k = _use_quantizer(self.k_quant, k, cache_current).to(q.dtype).contiguous()
+            v = _use_quantizer(self.v_quant, v, cache_current).to(q.dtype).contiguous()
             oup = _call_slow_attn(globals_dict, q, k, v, self.scale, attn_bias).transpose(1, 2).reshape(B, L, C)
 
+        _release_attention_dequant_workspaces(self)
+        del k, v
+        _maybe_empty_cuda_cache_after_scale(self)
         return self.proj_drop(self.proj(oup))
 
     _remember_attr(handle, module, "forward")
@@ -337,6 +402,8 @@ def _wrap_infinity_forward(handle: HookHandle, module: nn.Module) -> None:
 
         if getattr(self, "cos_attn", False):
             scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
+            if getattr(self, "using_flash", False):
+                scale_mul = scale_mul.permute(0, 2, 1, 3)
             q = F.normalize(q, dim=-1).mul(scale_mul)
             k = F.normalize(k, dim=-1)
 
@@ -344,13 +411,19 @@ def _wrap_infinity_forward(handle: HookHandle, module: nn.Module) -> None:
             apply_rotary_emb = globals_dict.get("apply_rotary_emb")
             if apply_rotary_emb is None:
                 raise RuntimeError("apply_rotary_emb is not available in the third-party Infinity runtime.")
-            q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
+            if getattr(self, "using_flash", False):
+                q, k = q.transpose(1, 2), k.transpose(1, 2)
+                q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
+                q, k = q.transpose(1, 2), k.transpose(1, 2)
+            else:
+                q, k = apply_rotary_emb(q, k, scale_schedule, rope2d_freqs_grid, self.pad_to_multiplier, self.rope2d_normalized_by_hw, scale_ind)
 
         _ensure_kv_quantizers(self, qkv_format)
+        cache_current = not _infinity_is_last_scale(self, scale_schedule, scale_ind)
         if bool(getattr(self, "rescale_qk", False)):
             q, k = self.k_quant.rescale_qk(q, k)
-        k = self.k_quant.use_var_q(k).to(q.dtype).contiguous()
-        v = self.v_quant.use_var_q(v).to(q.dtype).contiguous()
+        k = _use_quantizer(self.k_quant, k, cache_current).to(q.dtype).contiguous()
+        v = _use_quantizer(self.v_quant, v, cache_current).to(q.dtype).contiguous()
 
         if getattr(self, "using_flash", False):
             flash_attn_func = globals_dict.get("flash_attn_func")
@@ -365,15 +438,21 @@ def _wrap_infinity_forward(handle: HookHandle, module: nn.Module) -> None:
                     softmax_scale=self.scale,
                     VAR_visible_kvlen=attn_bias_or_two_vector[0],
                     VAR_invisible_qlen=attn_bias_or_two_vector[1],
-                ).view(B, L, C)
+                )
             else:
-                oup = flash_attn_func(q.to(main_type), k.to(main_type), v.to(main_type), dropout_p=0, softmax_scale=self.scale).view(B, L, C)
+                oup = flash_attn_func(q.to(main_type), k.to(main_type), v.to(main_type), dropout_p=0, softmax_scale=self.scale)
+            if oup.shape[1] != L:
+                oup = oup[:, -L:]
+            oup = oup.reshape(B, L, C)
         elif getattr(self, "use_flex_attn", False) and attn_fn is not None:
             oup = attn_fn(q, k, v, scale=self.scale).transpose(1, 2).reshape(B, L, C)
         else:
             attn_bias = None if attn_bias_or_two_vector is None else attn_bias_or_two_vector.to(x.device)
             oup = _call_slow_attn(globals_dict, q, k, v, self.scale, attn_bias).transpose(1, 2).reshape(B, L, C)
 
+        _release_attention_dequant_workspaces(self)
+        del k, v
+        _maybe_empty_cuda_cache_after_scale(self)
         return self.proj_drop(self.proj(oup))
 
     _remember_attr(handle, module, "forward")
@@ -438,9 +517,10 @@ def _wrap_infinitystar_forward(handle: HookHandle, module: nn.Module) -> None:
         if repeat_kv is not None:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
+        scale = getattr(self, "scale", self.head_dim**-0.5)
 
         if getattr(self, "use_flex_attn", False) and attn_fn is not None:
-            attn_output = attn_fn(query_states, key_states, value_states, scale=self.scale).transpose(1, 2)
+            attn_output = attn_fn(query_states, key_states, value_states, scale=scale).transpose(1, 2)
         else:
             query_states = query_states.transpose(1, 2)
             key_states = key_states.transpose(1, 2)
@@ -459,14 +539,14 @@ def _wrap_infinitystar_forward(handle: HookHandle, module: nn.Module) -> None:
                     key_states,
                     value_states,
                     dropout_p=0.0,
-                    softmax_scale=self.scale,
+                    softmax_scale=scale,
                 )
             else:
                 attn_output = F.scaled_dot_product_attention(
                     query_states.transpose(1, 2),
                     key_states.transpose(1, 2),
                     value_states.transpose(1, 2),
-                    scale=self.scale,
+                    scale=scale,
                 ).transpose(1, 2)
             if bool(getattr(self, "use_sequence_parallel_attn", False)) and sp_all_to_all is not None and _sp_active(sp_manager):
                 attn_output = sp_all_to_all(attn_output, scatter_dim=1, gather_dim=2)
@@ -494,7 +574,20 @@ def _infinitystar_cache_select(
         module.cached_v[scale_ind] = value_states
         return key_states, value_states
 
-    if last_repetition_step:
+    last_use_by_sid = [-1 for _ in range(len(context_info or {}))]
+    for query_sid, query_info in (context_info or {}).items():
+        if not isinstance(query_sid, int):
+            continue
+        for ref_sid in query_info.get("ref_sids", []):
+            if isinstance(ref_sid, int) and 0 <= ref_sid < len(last_use_by_sid):
+                last_use_by_sid[ref_sid] = max(last_use_by_sid[ref_sid], query_sid)
+
+    cache_current = (
+        not bool(getattr(module, "skip_cache_last_scale", True))
+        or scale_ind < len(last_use_by_sid)
+        and last_use_by_sid[scale_ind] > scale_ind
+    )
+    if last_repetition_step and cache_current:
         module.k_varq.cache_scale(scale_ind, key_states, overwrite=True, return_dequant=False)
         module.v_varq.cache_scale(scale_ind, value_states, overwrite=True, return_dequant=False)
 
@@ -514,14 +607,19 @@ def _infinitystar_cache_select(
     key_states = torch.cat(k_parts, dim=2) if len(k_parts) > 1 else key_states
     value_states = torch.cat(v_parts, dim=2) if len(v_parts) > 1 else value_states
 
-    clear_sids = list(info.get("clear_sids", []))
-    module.k_varq.clear_scales([sid for sid in clear_sids if isinstance(sid, int)])
-    module.v_varq.clear_scales([sid for sid in clear_sids if isinstance(sid, int)])
-    if getattr(module, "cached_k", None) is not None:
-        for sid in clear_sids:
-            if not isinstance(sid, int):
-                module.cached_k.pop(sid, None)
-                module.cached_v.pop(sid, None)
+    # InfinityStar's schedule metadata only records ref_sids. Match the native
+    # backend behavior: after each scale, drop any earlier scale whose last
+    # reference is before the current scale. Looking for a non-existent
+    # clear_sids field keeps every packed scale alive until kv_caching(False),
+    # which can make VAR-Q reserve more memory than the dense baseline.
+    stale_sids = [
+        ref_sid
+        for ref_sid in range(scale_ind)
+        if ref_sid < len(last_use_by_sid) and last_use_by_sid[ref_sid] < scale_ind
+    ]
+    if stale_sids:
+        module.k_varq.clear_scales(stale_sids)
+        module.v_varq.clear_scales(stale_sids)
     return key_states, value_states
 
 
@@ -575,10 +673,13 @@ def _configure_attention(
         "compression_ratio": float(cfg.get("compression_ratio", cfg.get("ratio", 1.0))),
         "max_scale_seq_len": int(cfg.get("max_scale_seq_len", 0) or 0),
         "rescale_qk": bool(cfg.get("rescale_qk", False)),
+        "skip_cache_last_scale": bool(cfg.get("skip_cache_last_scale", model_type in ("var", "infinity", "infinitystar"))),
+        "release_cuda_cache_after_scale": bool(cfg.get("release_cuda_cache_after_scale", True)),
         "enable_fused_kv_flashattn": bool(cfg.get("enable_fused_kv_flashattn", False)),
         "outlier_ratio": float(cfg.get("outlier_ratio", 0.0)),
         "outlier_mode": str(cfg.get("outlier_mode", "ratio")),
         "outlier_n_sigma": float(cfg.get("outlier_n_sigma", 3.0)),
+        "debug_memory": bool(cfg.get("debug_memory", cfg.get("profile_memory", False))),
         "ablation_config": dict(ablation_config or {}),
         "block_idx": int(getattr(module, "block_idx", block_idx)),
         "_varq_runtime_hooked": True,
@@ -601,7 +702,35 @@ def _wrap_kv_caching(handle: HookHandle, module: nn.Module, model_type: str) -> 
     original = module.kv_caching
 
     def kv_caching_wrapper(self: nn.Module, enable: bool):
+        if enable and hasattr(self, "_varq_last_memory_breakdown"):
+            delattr(self, "_varq_last_memory_breakdown")
+        if not enable:
+            snapshot = {
+                "packed_kv_bytes": 0,
+                "scale_bytes": 0,
+                "dequant_workspace_bytes": 0,
+                "dequant_workspace_peak_bytes": 0,
+                "packed_cache_allocated_bytes": 0,
+                "scale_cache_allocated_bytes": 0,
+            }
+            for attr in ("k_quant", "v_quant"):
+                quantizer = getattr(self, attr, None)
+                if quantizer is not None and hasattr(quantizer, "memory_breakdown"):
+                    stats = quantizer.memory_breakdown()
+                    for key in snapshot:
+                        snapshot[key] += int(stats.get(key, 0))
+            for attr in ("k_varq", "v_varq"):
+                quantizer = getattr(self, attr, None)
+                if quantizer is not None and hasattr(quantizer, "cache_bytes"):
+                    stats = quantizer.cache_bytes()
+                    snapshot["packed_kv_bytes"] += int(stats.get("packed_bytes", 0))
+                    snapshot["scale_bytes"] += int(stats.get("scale_bytes", 0))
+                    snapshot["dequant_workspace_bytes"] += int(stats.get("dequant_workspace_bytes", 0))
+                    snapshot["dequant_workspace_peak_bytes"] += int(stats.get("dequant_workspace_peak_bytes", 0))
+            self._varq_last_memory_breakdown = snapshot
         result = original(enable)
+        if not enable and bool(getattr(self, "release_cuda_cache_after_scale", True)) and torch.cuda.is_available():
+            torch.cuda.empty_cache()
         if not enable or not bool(getattr(self, "enable_quantization", False)):
             return result
         if model_type == "infinitystar":
@@ -618,6 +747,7 @@ def _wrap_kv_caching(handle: HookHandle, module: nn.Module, model_type: str) -> 
                     compression_ratio=float(getattr(self, "compression_ratio", 1.0)),
                     max_scale_seq_len=(int(getattr(self, "max_scale_seq_len", 0)) or None),
                     rescale_qk=bool(getattr(self, "rescale_qk", False)),
+                    debug=bool(getattr(self, "debug_memory", False)),
                     dequant_dtype="bf16",
                     ablation_config=getattr(self, "ablation_config", None),
                 )
@@ -633,6 +763,7 @@ def _wrap_kv_caching(handle: HookHandle, module: nn.Module, model_type: str) -> 
                     compression_ratio=float(getattr(self, "compression_ratio", 1.0)),
                     max_scale_seq_len=(int(getattr(self, "max_scale_seq_len", 0)) or None),
                     rescale_qk=bool(getattr(self, "rescale_qk", False)),
+                    debug=bool(getattr(self, "debug_memory", False)),
                     dequant_dtype="bf16",
                     ablation_config=getattr(self, "ablation_config", None),
                 )
@@ -651,6 +782,7 @@ def _wrap_kv_caching(handle: HookHandle, module: nn.Module, model_type: str) -> 
                 compression_ratio=float(getattr(self, "compression_ratio", 1.0)),
                 max_scale_seq_len=(int(getattr(self, "max_scale_seq_len", 0)) or None),
                 rescale_qk=bool(getattr(self, "rescale_qk", False)),
+                debug=bool(getattr(self, "debug_memory", False)),
                 outlier_ratio=float(getattr(self, "outlier_ratio", 0.0)),
                 outlier_mode=str(getattr(self, "outlier_mode", "ratio")),
                 outlier_n_sigma=float(getattr(self, "outlier_n_sigma", 3.0)),
@@ -669,6 +801,7 @@ def _wrap_kv_caching(handle: HookHandle, module: nn.Module, model_type: str) -> 
                 compression_ratio=float(getattr(self, "compression_ratio", 1.0)),
                 max_scale_seq_len=(int(getattr(self, "max_scale_seq_len", 0)) or None),
                 rescale_qk=bool(getattr(self, "rescale_qk", False)),
+                debug=bool(getattr(self, "debug_memory", False)),
                 outlier_ratio=float(getattr(self, "outlier_ratio", 0.0)),
                 outlier_mode=str(getattr(self, "outlier_mode", "ratio")),
                 outlier_n_sigma=float(getattr(self, "outlier_n_sigma", 3.0)),
@@ -680,6 +813,16 @@ def _wrap_kv_caching(handle: HookHandle, module: nn.Module, model_type: str) -> 
     module.kv_caching = types.MethodType(kv_caching_wrapper, module)
 
 
+def _last_scale_seq_len(model: nn.Module, model_type: str, cfg: Dict[str, Any]) -> int:
+    if "last_scale_seq_len" in cfg:
+        return int(cfg["last_scale_seq_len"])
+    if model_type == "var" and hasattr(model, "patch_nums"):
+        patch_nums = getattr(model, "patch_nums")
+        if patch_nums:
+            return int(patch_nums[-1]) ** 2
+    return 0
+
+
 def install_varq_hooks(
     model: nn.Module,
     model_type: str,
@@ -689,11 +832,24 @@ def install_varq_hooks(
     normalized_type = str(model_type).lower()
     if normalized_type not in SUPPORTED_MODEL_TYPES:
         raise ValueError(f"Unsupported model_type={model_type}. Expected one of {SUPPORTED_MODEL_TYPES}.")
+    if normalized_type in ("self_forcing", "longlive", "generic_video"):
+        raise ValueError(
+            f"model_type={model_type} uses the backend-agnostic VideoKVCacheAdapter. "
+            "Instantiate VAR_Q.hooks.VideoKVCacheAdapter from the backend attention code and call "
+            "adapter.update(k, v, scale_idx=..., num_scales=...)."
+        )
     cfg = _normalize_quant_config(quant_config)
     handle = HookHandle(model=model, model_type=normalized_type)
-    for block_idx, (_name, module) in enumerate(_iter_attention_modules(model, normalized_type)):
+    last_scale_seq_len = _last_scale_seq_len(model, normalized_type, cfg)
+    attention_modules = list(_iter_attention_modules(model, normalized_type))
+    last_attention_order_idx = len(attention_modules) - 1
+    for block_idx, (_name, module) in enumerate(attention_modules):
         _patch_builder_globals(module, normalized_type)
         _configure_attention(handle, module, normalized_type, cfg, ablation_config, block_idx)
+        _set_attr(handle, module, "_varq_hook_order_idx", block_idx)
+        _set_attr(handle, module, "_varq_last_attention_order_idx", last_attention_order_idx)
+        if last_scale_seq_len:
+            _set_attr(handle, module, "last_scale_seq_len", last_scale_seq_len)
         if hasattr(module, "kv_caching"):
             _wrap_kv_caching(handle, module, normalized_type)
         _wrap_forward(handle, module, normalized_type)

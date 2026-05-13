@@ -16,6 +16,12 @@ from .quant import (
     resolve_dequant_dtype,
     validate_quantization_args,
 )
+from .profiling import (
+    collect_varq_memory_breakdown,
+    cuda_memory_stats,
+    format_memory_breakdown,
+    reset_cuda_memory_stats,
+)
 
 __all__ = [
     "CANONICAL_QUANT_METHODS",
@@ -34,4 +40,8 @@ __all__ = [
     "quantize_tensor",
     "resolve_dequant_dtype",
     "validate_quantization_args",
+    "collect_varq_memory_breakdown",
+    "cuda_memory_stats",
+    "format_memory_breakdown",
+    "reset_cuda_memory_stats",
 ]

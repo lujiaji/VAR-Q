@@ -22,6 +22,7 @@ fi
 export PYTHONPATH="${ROOT_DIR}:${LONGLIVE_DIR}:${PYTHONPATH:-}"
 export LONGLIVE_VARQ_CONFIG="${CONFIG}"
 export VARQ_CONFIG_FILE="${CONFIG}"
+export VARQ_BACKEND="longlive"
 
 cd "${LONGLIVE_DIR}"
 "$@"

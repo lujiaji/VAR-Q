@@ -13,9 +13,6 @@ authors = [
   { name = "VAR-Q Authors" },
 ]
 dependencies = [
-  "torch",
-  "triton",
-  "numpy",
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -28,6 +25,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+triton = [
+  "triton",
+]
 dev = [
   "pytest",
 ]
@@ -38,7 +38,7 @@ Documentation = "https://github.com/VAR-Q/VAR-Q#readme"
 Issues = "https://github.com/VAR-Q/VAR-Q/issues"
 
 [tool.setuptools.packages.find]
-include = ["VAR_Q*", "ablation*"]
+include = ["VAR_Q*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

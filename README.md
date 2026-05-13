@@ -7,13 +7,15 @@ It reduces inference-time KV-cache memory while preserving generation quality, a
   <img src="assets/VAR-Q-performance.png" alt="VAR-Q performance summary" width="820">
 </p>
 
-## ⚡ Quick Start in 60 Seconds
+## ⚡ Quick Start
 
 This smoke path does not require third-party backends, checkpoints, or datasets.
 
 ```bash
-git clone <this-repo-url> VAR-Q
+git clone git@github.com:lujiaji/VAR-Q.git
 cd VAR-Q
+git checkout varq_official
+# Install PyTorch first from https://pytorch.org/get-started/locally/
 pip install -e .
 python examples/smoke_quant_roundtrip.py
 python examples/smoke_pack_unpack.py
@@ -80,27 +82,42 @@ Ignored local-only paths include `third_party/`, `temp/`, benchmark outputs, mod
 
 ## 🚀 Installation
 
-Clone VAR-Q:
+Clone VAR-Q and check out the public branch:
 
 ```bash
-git clone <this-repo-url> VAR-Q
+git clone git@github.com:lujiaji/VAR-Q.git
 cd VAR-Q
+git checkout varq_official
 ```
 
-Install the third-party backend environment from its official repository first. Then install the minimal VAR-Q core requirements:
+Install PyTorch first, matching your CUDA driver and runtime. Follow the official PyTorch selector rather than relying on VAR-Q to pin a wheel:
+
+```bash
+# Example only. Choose the command for your CUDA version from:
+# https://pytorch.org/get-started/locally/
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+```
+
+Install VAR-Q in editable mode:
 
 ```bash
 conda activate <your-backend-env>
 pip install -e .
 ```
 
-For a non-editable minimal dependency install, `requirements-varq.txt` is also retained:
+Triton is optional acceleration for low-bit pack/unpack on CUDA. Without Triton, `import VAR_Q` still works and pack/unpack falls back to the PyTorch implementation.
+
+```bash
+pip install triton
+```
+
+For a non-editable minimal convenience install after PyTorch is already installed, `requirements-varq.txt` is retained:
 
 ```bash
 pip install -r requirements-varq.txt
 ```
 
-VAR-Q itself only needs lightweight PyTorch/Triton-compatible tensor support. VAR, Infinity, InfinityStar, Self-Forcing, and LongLive may pin different CUDA, PyTorch, `flash-attn`, `xformers`, tokenizer, or evaluation package versions; those requirements belong to the official upstream repositories, not to VAR-Q.
+VAR-Q itself only needs PyTorch for the fallback path and can use Triton when available. VAR, Infinity, InfinityStar, Self-Forcing, and LongLive may pin different CUDA, PyTorch, `flash-attn`, `xformers`, tokenizer, or evaluation package versions; install those dependencies inside each official upstream repository instead of putting them into the VAR-Q root environment metadata.
 
 ## 🧪 Tested Environments
 
@@ -154,6 +171,32 @@ remove_varq_hooks(handle)
 ```
 
 Use `quant_method="VARQ"` or any `G_*` method for the main method. Use `KIVI`, `FLexGen`, or `KVQuant` in public configs for ablations; the loader normalizes them to isolated ablation implementations.
+
+For next-frame video backends whose attention internals differ across releases
+such as Self-Forcing and LongLive, use the backend-agnostic KV adapter inside
+the backend attention path after K/V tensors are produced:
+
+```python
+from VAR_Q.hooks import VideoKVCacheAdapter
+
+# Or use VideoKVCacheAdapter.from_env() with VARQ_CONFIG_FILE exported by
+# scripts/inference_SelfForcing.sh and scripts/inference_LongLive.sh.
+kv_adapter = VideoKVCacheAdapter(quant_config)
+
+# Inside the backend attention loop, after current k/v are computed:
+k, v = kv_adapter.update(
+    k,
+    v,
+    scale_idx=current_chunk_idx,
+    num_scales=num_chunks,
+)
+
+# Run the backend's normal attention with the returned k/v.
+```
+
+The adapter supports the same `VARQ`, `G_*`, `KIVI`, `FLexGen`, and `KVQuant`
+method names, keeps `max_scale_seq_len=1560` as the default video chunk unit,
+and skips persistent caching for the final chunk by default.
 
 ## 🎯 Inference Scripts
 

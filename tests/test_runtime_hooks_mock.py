@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from VAR_Q.hooks import install_varq_hooks, is_hooked, remove_varq_hooks
+from VAR_Q.hooks import VideoKVCacheAdapter, install_varq_hooks, is_hooked, remove_varq_hooks
 
 
 class SelfAttention(nn.Module):
@@ -68,3 +68,33 @@ def test_mock_attention_install_quantize_and_remove_hook():
 
     assert not is_hooked(model)
     assert model.attn.forward.__func__ is original_forward.__func__
+
+
+def test_video_kv_cache_adapter_skip_last_scale():
+    adapter = VideoKVCacheAdapter(
+        {
+            "enable": True,
+            "q_bits": 4,
+            "quant_method": "VARQ",
+            "qkv_format": "BLHc",
+            "pack_to_int32": True,
+            "max_scale_seq_len": 4,
+            "skip_cache_last_scale": True,
+        }
+    )
+    k0 = torch.randn(1, 4, 2, 8)
+    v0 = torch.randn(1, 4, 2, 8)
+    k1 = torch.randn(1, 4, 2, 8)
+    v1 = torch.randn(1, 4, 2, 8)
+
+    out_k0, out_v0 = adapter.update(k0, v0, scale_idx=0, num_scales=2)
+    assert out_k0.shape == k0.shape
+    assert out_v0.shape == v0.shape
+
+    out_k1, out_v1 = adapter.update(k1, v1, scale_idx=1, num_scales=2)
+    assert out_k1.shape[1] == k0.shape[1] + k1.shape[1]
+    assert out_v1.shape[1] == v0.shape[1] + v1.shape[1]
+
+    stats = adapter.memory_breakdown()
+    assert stats["packed_kv_bytes"] > 0
+    assert stats["dequant_workspace_bytes"] == 0

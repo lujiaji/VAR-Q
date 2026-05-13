@@ -22,6 +22,7 @@ fi
 export PYTHONPATH="${ROOT_DIR}:${SF_DIR}:${PYTHONPATH:-}"
 export SELF_FORCING_VARQ_CONFIG="${CONFIG}"
 export VARQ_CONFIG_FILE="${CONFIG}"
+export VARQ_BACKEND="self_forcing"
 
 cd "${SF_DIR}"
 "$@"

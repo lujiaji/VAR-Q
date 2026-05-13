@@ -23,6 +23,7 @@ if repo_root not in sys.path:
 from VAR_Q.config_loader import VARQConfig
 from VAR_Q.hooks import install_varq_hooks
 from VAR_Q.paths import prepend_sys_path, require_third_party_repo
+from VAR_Q.profiling import collect_varq_memory_breakdown, format_memory_breakdown, reset_cuda_memory_stats
 
 infinity_star_root = str(require_third_party_repo("InfinityStar", "https://github.com/FoundationVision/InfinityStar"))
 prepend_sys_path([repo_root, infinity_star_root])
@@ -72,11 +73,16 @@ def main():
         "--prompt",
         default="A handsome smiling gardener inspecting plants, realistic cinematic lighting, detailed textures, ultra-realistic",
     )
+    parser.add_argument("--batch_size", type=int, default=1, help="Number of prompts generated in one batch")
     parser.add_argument(
         "--output",
         default=os.path.join(repo_root, "scripts", "output", "infinitystar_varq_demo.mp4"),
     )
+    parser.add_argument("--reference_image", default="", help="Optional reference image for I2V; empty means text-to-video")
+    parser.add_argument("--profile_memory", action="store_true", help="Print VAR-Q cache and CUDA allocator memory stats")
     cli = parser.parse_args()
+    if cli.batch_size < 1:
+        raise ValueError(f"--batch_size must be >= 1, got {cli.batch_size}")
 
     public_config = VARQConfig(cli.config)
     quant_config = public_config.get_quantization_config()
@@ -160,6 +166,8 @@ def main():
         quant_config,
         ablation_config=ablation_config,
     )
+    if cli.profile_memory:
+        reset_cuda_memory_stats()
     self_correction = SelfCorrection(vae, args)
 
     video_encode, video_decode, get_visual_rope_embeds, get_scale_pack_info = get_encode_decode_func(
@@ -181,11 +189,14 @@ def main():
     )
 
     prompt = cli.prompt
-    image_path = os.path.join(infinity_star_root, "assets", "reference_image.webp")
-    if not os.path.isfile(image_path):
-        image_path = None
+    image_path = cli.reference_image or None
+    if image_path is not None:
+        image_path = os.path.abspath(image_path)
+        if not os.path.isfile(image_path):
+            raise FileNotFoundError(f"Reference image not found: {image_path}")
     if args.append_duration2caption:
         prompt = f"<<<t={generation_duration}s>>>" + prompt
+    prompts = [prompt] * cli.batch_size
 
     gt_leak, gt_ls_Bl = -1, None
     if image_path and os.path.isfile(image_path):
@@ -214,7 +225,7 @@ def main():
             vae,
             text_tokenizer,
             text_encoder,
-            prompt,
+            prompts,
             negative_prompt="",
             g_seed=42,
             gt_leak=gt_leak,
@@ -232,19 +243,31 @@ def main():
             context_info=context_info,
             noise_list=None,
         )
+    if cli.profile_memory:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        stats = collect_varq_memory_breakdown(infinity)
+        print("[VAR-Q memory] " + format_memory_breakdown(stats))
     elapsed = time.time() - st
     if generated_image.dim() == 3:
         generated_image = generated_image.unsqueeze(0)
     out_np = generated_image.cpu().numpy()
-    if out_np.ndim == 5:
-        out_np = out_np[0]
+    if out_np.ndim == 4:
+        out_np = out_np[None, ...]
     print(f"[InfinityStar] Done in {elapsed:.2f}s, shape {out_np.shape}")
 
     out_dir = os.path.dirname(os.path.abspath(cli.output))
     os.makedirs(out_dir, exist_ok=True)
     save_path = os.path.abspath(cli.output)
-    save_video(out_np, fps=args.fps, save_filepath=save_path)
-    print(f"Video saved: {save_path}")
+    if out_np.ndim == 5:
+        stem, ext = os.path.splitext(save_path)
+        for batch_idx, frames in enumerate(out_np):
+            item_path = save_path if out_np.shape[0] == 1 else f"{stem}_{batch_idx:03d}{ext}"
+            save_video(frames, fps=args.fps, save_filepath=item_path)
+            print(f"Video saved: {item_path}")
+    else:
+        save_video(out_np, fps=args.fps, save_filepath=save_path)
+        print(f"Video saved: {save_path}")
 
 
 if __name__ == "__main__":

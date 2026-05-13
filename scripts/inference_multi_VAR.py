@@ -15,6 +15,11 @@ if VARQ_ROOT not in sys.path:
 
 from VAR_Q.hooks import install_varq_hooks
 from VAR_Q.paths import prepend_sys_path, require_third_party_repo
+from VAR_Q.profiling import (
+    collect_varq_memory_breakdown,
+    format_memory_breakdown,
+    reset_cuda_memory_stats,
+)
 
 VAR_REPO_ROOT = require_third_party_repo("VAR", "https://github.com/FoundationVision/VAR")
 prepend_sys_path([VARQ_ROOT, VAR_REPO_ROOT.parent])
@@ -39,6 +44,8 @@ parser.add_argument(
 parser.add_argument("--total_iters", type=int, default=None, help="Total number of iterations (overrides config)")
 parser.add_argument("--batch_size", type=int, default=None, help="Batch size per iteration (overrides config)")
 parser.add_argument("--save_path", type=str, default='Benchmark/output/VAR/images', help="Save path for generated images")
+parser.add_argument("--profile_memory", action="store_true", help="Print VAR-Q cache and CUDA allocator memory stats")
+parser.add_argument("--skip_npz", action="store_true", help="Skip ImageNet-style NPZ export for smoke runs")
 parser.add_argument("--vae_ckpt", type=str, default=os.environ.get("VARQ_VAE_CKPT"), help="Path to VAR VAE checkpoint")
 parser.add_argument(
     "--var_ckpt_template",
@@ -112,6 +119,8 @@ for p in vae.parameters(): p.requires_grad_(False)
 for p in var.parameters(): p.requires_grad_(False)
 
 print(f'Model preparation finished.')
+if args.profile_memory:
+    reset_cuda_memory_stats()
 
 # Get inference parameters from config
 inference_config = config.get_inference_config()
@@ -168,12 +177,20 @@ with torch.inference_mode():
                 g_seed = seed, 
                 more_smooth = more_smooth
             )
+            if args.profile_memory:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                stats = collect_varq_memory_breakdown(var)
+                print("[VAR-Q memory] " + format_memory_breakdown(stats))
             for i in range(images_per_iter):
                 img = result[i].clone()
                 img = img.permute(1, 2, 0).mul_(255).cpu().numpy()
                 img = PImage.fromarray(img.astype(np.uint8))
                 img.save(os.path.join(save_path, f"iters{step}_img{i}.png"))
 
-print(f"Image generation complete >> Generating npz")
-npz_path = create_npz_from_sample_folder(save_path)
-print(f"Image generation complete >> Generate npz -->  {npz_path}")
+if args.skip_npz:
+    print("Image generation complete >> Skip npz export")
+else:
+    print(f"Image generation complete >> Generating npz")
+    npz_path = create_npz_from_sample_folder(save_path)
+    print(f"Image generation complete >> Generate npz -->  {npz_path}")

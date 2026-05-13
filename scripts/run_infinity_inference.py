@@ -17,6 +17,11 @@ if REPO_ROOT not in sys.path:
 from VAR_Q.hooks import install_varq_hooks
 from VAR_Q.infinity_config import apply_infinity_config
 from VAR_Q.paths import prepend_sys_path, require_third_party_repo
+from VAR_Q.profiling import (
+    collect_varq_memory_breakdown,
+    format_memory_breakdown,
+    reset_cuda_memory_stats,
+)
 
 
 def _load_infinity_runtime():
@@ -53,7 +58,9 @@ def _build_parser(add_common_arguments) -> argparse.ArgumentParser:
         help="VAR-Q JSON config.",
     )
     parser.add_argument("--prompt", type=str, default="a dog")
+    parser.add_argument("--batch_size", type=int, default=1, help="Repeat the prompt this many times for batched smoke inference")
     parser.add_argument("--save_file", type=str, default=osp.join(REPO_ROOT, "scripts/output/infinity.png"))
+    parser.add_argument("--profile_memory", action="store_true", help="Print VAR-Q cache and CUDA allocator memory stats")
     return parser
 
 
@@ -80,6 +87,8 @@ def main() -> None:
     vae = load_visual_tokenizer(args)
     infinity = load_transformer(vae, args)
     install_varq_hooks(infinity, "infinity", quant_config, ablation_config=ablation_config)
+    if args.profile_memory:
+        reset_cuda_memory_stats()
 
     dynamic_resolution_h_w, _h_div_w_templates = import_dynamic_resolution()
     scale_schedule = dynamic_resolution_h_w[args.h_div_w_template][args.pn]["scales"]
@@ -91,7 +100,7 @@ def main() -> None:
             vae,
             text_tokenizer,
             text_encoder,
-            args.prompt,
+            [args.prompt] * int(args.batch_size),
             g_seed=args.seed,
             gt_leak=0,
             gt_ls_Bl=None,
@@ -102,11 +111,28 @@ def main() -> None:
             vae_type=args.vae_type,
             sampling_per_bits=args.sampling_per_bits,
             enable_positive_prompt=args.enable_positive_prompt,
-        )
+    )
+    if args.profile_memory:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        stats = collect_varq_memory_breakdown(infinity)
+        print("[VAR-Q memory] " + format_memory_breakdown(stats))
 
-    os.makedirs(osp.dirname(osp.abspath(args.save_file)), exist_ok=True)
-    cv2.imwrite(args.save_file, generated_image.cpu().numpy())
-    print(f"Saved to {osp.abspath(args.save_file)}")
+    save_file = osp.abspath(args.save_file)
+    os.makedirs(osp.dirname(save_file), exist_ok=True)
+    if isinstance(generated_image, torch.Tensor) and generated_image.ndim == 4:
+        stem, ext = osp.splitext(save_file)
+        for idx, image in enumerate(generated_image):
+            cv2.imwrite(f"{stem}_{idx:03d}{ext}", image.cpu().numpy())
+        print(f"Saved {generated_image.shape[0]} images to {stem}_*.{ext.lstrip('.')}")
+    elif isinstance(generated_image, list):
+        stem, ext = osp.splitext(save_file)
+        for idx, image in enumerate(generated_image):
+            cv2.imwrite(f"{stem}_{idx:03d}{ext}", image.cpu().numpy())
+        print(f"Saved {len(generated_image)} images to {stem}_*.{ext.lstrip('.')}")
+    else:
+        cv2.imwrite(save_file, generated_image.cpu().numpy())
+        print(f"Saved to {save_file}")
 
 
 if __name__ == "__main__":
