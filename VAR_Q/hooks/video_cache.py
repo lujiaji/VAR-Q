@@ -24,6 +24,9 @@ def _normalize_video_quant_config(config: Optional[Dict[str, Any]]) -> Dict[str,
     cfg.setdefault("compression_ratio", 1.0)
     cfg.setdefault("max_scale_seq_len", 1560)
     cfg.setdefault("skip_cache_last_scale", True)
+    cfg.setdefault("dequant_dtype", "native")
+    cfg.setdefault("quant_compute_dtype", "native")
+    cfg.setdefault("dequant_workspace_policy", "release")
     return cfg
 
 
@@ -88,12 +91,16 @@ class VideoKVCacheAdapter:
             rescale_qk=bool(cfg.get("rescale_qk", False)),
             debug=bool(cfg.get("debug_memory", cfg.get("profile_memory", False))),
             ablation_config=self.ablation_config,
-            dequant_dtype=str(cfg.get("dequant_dtype", "bf16")),
+            dequant_dtype=str(cfg.get("dequant_dtype", "native")),
+            quant_compute_dtype=str(cfg.get("quant_compute_dtype", "native")),
+            expected_total_seq_len=int(cfg.get("expected_total_seq_len", 0) or 0) or None,
+            preallocate_kv_cache=bool(cfg.get("preallocate_kv_cache", bool(cfg.get("expected_total_seq_len", 0)))),
+            dequant_workspace_policy=str(cfg.get("dequant_workspace_policy", "release")),
         )
 
     def reset(self) -> None:
-        self.k_quant._reset_cache_buffers()
-        self.v_quant._reset_cache_buffers()
+        self.k_quant.clear_cache(free_buffers=True)
+        self.v_quant.clear_cache(free_buffers=True)
         self.release_workspaces()
 
     def release_workspaces(self) -> None:
@@ -125,9 +132,16 @@ class VideoKVCacheAdapter:
             # rescale_qk should call the lower-level quantizer from their own
             # attention wrapper where Q is in scope.
             raise ValueError("rescale_qk=True requires Q and is not supported by VideoKVCacheAdapter.update().")
-        key_out = self.k_quant.use_var_q(key, cache_current=cache).to(key.dtype).contiguous()
-        value_out = self.v_quant.use_var_q(value, cache_current=cache).to(value.dtype).contiguous()
-        self.release_workspaces()
+        key_out = self.k_quant.use_var_q(key, cache_current=cache)
+        value_out = self.v_quant.use_var_q(value, cache_current=cache)
+        if key_out.dtype != key.dtype:
+            key_out = key_out.to(key.dtype)
+        if value_out.dtype != value.dtype:
+            value_out = value_out.to(value.dtype)
+        key_out = key_out.contiguous()
+        value_out = value_out.contiguous()
+        self.k_quant.maybe_release_dequant_workspace()
+        self.v_quant.maybe_release_dequant_workspace()
         return key_out, value_out
 
     def memory_breakdown(self) -> Dict[str, int]:

@@ -15,6 +15,7 @@ InfinityStar 推理脚本（含 VAR-Q），用于验证修复后的生成效果�
 import os
 import sys
 import argparse
+import json
 
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if repo_root not in sys.path:
@@ -24,6 +25,8 @@ from VAR_Q.config_loader import VARQConfig
 from VAR_Q.hooks import install_varq_hooks
 from VAR_Q.paths import prepend_sys_path, require_third_party_repo
 from VAR_Q.profiling import collect_varq_memory_breakdown, format_memory_breakdown, reset_cuda_memory_stats
+
+MARKER = "VARQ_VIDEO_BENCH_RESULT="
 
 infinity_star_root = str(require_third_party_repo("InfinityStar", "https://github.com/FoundationVision/InfinityStar"))
 prepend_sys_path([repo_root, infinity_star_root])
@@ -243,6 +246,7 @@ def main():
             context_info=context_info,
             noise_list=None,
         )
+    stats = {}
     if cli.profile_memory:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -255,6 +259,33 @@ def main():
     if out_np.ndim == 4:
         out_np = out_np[None, ...]
     print(f"[InfinityStar] Done in {elapsed:.2f}s, shape {out_np.shape}")
+    if torch.cuda.is_available():
+        stats.update(
+            {
+                "cuda_memory_allocated": int(torch.cuda.memory_allocated()),
+                "cuda_max_memory_allocated": int(torch.cuda.max_memory_allocated()),
+                "cuda_memory_reserved": int(torch.cuda.memory_reserved()),
+                "cuda_max_memory_reserved": int(torch.cuda.max_memory_reserved()),
+            }
+        )
+    print(
+        MARKER
+        + json.dumps(
+            {
+                "ok": True,
+                "model": "InfinityStar",
+                "method": "baseline" if not bool(quant_config.get("enable", True)) else "varq",
+                "bits": None if not bool(quant_config.get("enable", True)) else int(quant_config.get("q_bits", 8)),
+                "batch_size": cli.batch_size,
+                "elapsed_sec": elapsed,
+                "throughput_items_per_sec": cli.batch_size / elapsed,
+                "shape": list(out_np.shape),
+                **stats,
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
     out_dir = os.path.dirname(os.path.abspath(cli.output))
     os.makedirs(out_dir, exist_ok=True)

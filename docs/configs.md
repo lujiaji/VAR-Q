@@ -14,7 +14,11 @@ VAR-Q JSON configs are intentionally small. Model weights, dataset paths, genera
     "pack_to_int32": true,
     "compression_ratio": 1.0,
     "max_scale_seq_len": 1560,
-    "rescale_qk": false
+    "rescale_qk": false,
+    "quant_compute_dtype": "native",
+    "dequant_dtype": "native",
+    "dequant_workspace_policy": "release",
+    "empty_cache_policy": "after_generation"
   }
 }
 ```
@@ -31,6 +35,13 @@ VAR-Q JSON configs are intentionally small. Model weights, dataset paths, genera
 | `compression_ratio` / `ratio` | Controls sequence grouping. `1.0` means the default grouping unit. Smaller values split more finely; larger values group longer chunks when `max_scale_seq_len` is provided. |
 | `max_scale_seq_len` | Optional reference sequence length for chunked grouping. For next-frame video configs, `1560` is the default group unit. |
 | `rescale_qk` | Enables optional Q/K range rescaling before attention. Default is false. |
+| `quant_compute_dtype` | `native` avoids a full temporary `x.to(fp32)` tensor during quantization. `fp32` keeps the older higher-precision compute path. |
+| `dequant_dtype` | `native` follows the attention tensor dtype. `bf16`, `fp16`, and `fp32` force a fixed dequant output dtype. |
+| `expected_total_seq_len` | Optional known maximum cache sequence length. When set with `preallocate_kv_cache`, VAR-Q allocates exact cache buffers instead of geometric growth. |
+| `preallocate_kv_cache` | Enables exact cache preallocation when `expected_total_seq_len` is known. |
+| `dequant_workspace_policy` | `release` drops temporary dequant workspaces after attention, `reuse` keeps them, and `auto` currently follows the release path. |
+| `empty_cache_policy` | `never`, `after_generation`, `threshold`, or legacy `after_scale`. The default is `after_generation`, not per-scale emptying. |
+| `empty_cache_threshold_bytes` | Used only with `empty_cache_policy="threshold"`; releases cached CUDA blocks when reserved minus allocated exceeds this value. |
 | `kivi_group_size` | Group size used by KIVI-style ablation quantizers. |
 | `kivi_cali_k_group_size`, `kivi_cali_v_group_size` | Calibration group sizes for KIVI calibration variants. |
 

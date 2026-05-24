@@ -8,10 +8,15 @@ import torch
 MEMORY_KEYS = (
     "packed_kv_bytes",
     "scale_bytes",
+    "active_cache_bytes",
     "dequant_workspace_bytes",
     "dequant_workspace_peak_bytes",
     "packed_cache_allocated_bytes",
     "scale_cache_allocated_bytes",
+    "cache_buffer_bytes",
+    "current_quantized_bytes",
+    "current_scale_bytes",
+    "temporary_estimated_bytes",
 )
 
 
@@ -69,6 +74,7 @@ def collect_varq_memory_breakdown(model: torch.nn.Module) -> Dict[str, int]:
             stats = quantizer.cache_bytes()
             total["packed_kv_bytes"] += int(stats.get("packed_bytes", 0))
             total["scale_bytes"] += int(stats.get("scale_bytes", 0))
+            total["active_cache_bytes"] += int(stats.get("packed_bytes", 0)) + int(stats.get("scale_bytes", 0))
             total["dequant_workspace_bytes"] += int(stats.get("dequant_workspace_bytes", 0))
             total["dequant_workspace_peak_bytes"] += int(stats.get("dequant_workspace_peak_bytes", 0))
 
@@ -80,8 +86,11 @@ def format_memory_breakdown(stats: Dict[str, int]) -> str:
     return (
         f"packed_kv_bytes={stats.get('packed_kv_bytes', 0)} "
         f"scale_bytes={stats.get('scale_bytes', 0)} "
+        f"active_cache_bytes={stats.get('active_cache_bytes', 0)} "
         f"dequant_workspace_bytes={stats.get('dequant_workspace_bytes', 0)} "
         f"dequant_workspace_peak_bytes={stats.get('dequant_workspace_peak_bytes', 0)} "
+        f"cache_buffer_bytes={stats.get('cache_buffer_bytes', 0)} "
+        f"temporary_estimated_bytes={stats.get('temporary_estimated_bytes', 0)} "
         f"cuda_memory_allocated={stats.get('cuda_memory_allocated', 0)} "
         f"cuda_max_memory_allocated={stats.get('cuda_max_memory_allocated', 0)} "
         f"cuda_memory_reserved={stats.get('cuda_memory_reserved', 0)} "

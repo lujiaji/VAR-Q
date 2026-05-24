@@ -10,11 +10,13 @@ from VAR_Q.pack_unpack import (
 
 try:
     from VAR_Q.pack_unpack import (
+        unpack_dequant_last_dim_from_int32_triton,
         pack_last_dim_to_int32_triton,
         unpack_last_dim_from_int32_triton,
     )
     _HAS_TRITON = bool(_PACK_HAS_TRITON)
 except Exception:
+    unpack_dequant_last_dim_from_int32_triton = None
     pack_last_dim_to_int32_triton = None
     unpack_last_dim_from_int32_triton = None
     _HAS_TRITON = False
@@ -92,30 +94,6 @@ def _normalize_kv_role(kv_role: str) -> str:
     return role
 
 
-def _group_lengths_for_axis(total: int, group_size: int) -> List[int]:
-    if group_size <= 0:
-        raise ValueError(f"group_size must be positive, got {group_size}")
-    if total < 0:
-        raise ValueError(f"axis length must be non-negative, got {total}")
-    return [min(group_size, total - start) for start in range(0, total, group_size)]
-
-
-def _to_bhld_layout(tensor: torch.Tensor, qkv_format: str) -> torch.Tensor:
-    if qkv_format == "BLHc":
-        return tensor.permute(0, 2, 1, 3).contiguous()
-    if qkv_format == "BHLc":
-        return tensor
-    raise ValueError(f"Unsupported qkv_format={qkv_format}")
-
-
-def _from_bhld_layout(tensor: torch.Tensor, qkv_format: str) -> torch.Tensor:
-    if qkv_format == "BLHc":
-        return tensor.permute(0, 2, 1, 3).contiguous()
-    if qkv_format == "BHLc":
-        return tensor
-    raise ValueError(f"Unsupported qkv_format={qkv_format}")
-
-
 def _clone_quant_meta(quant_meta: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if quant_meta is None:
         return None
@@ -152,6 +130,29 @@ def _expand_compact_scale_for_shape(
         expanded = expanded[tuple(slices)]
     return expanded
 
+
+def _slice_dim(tensor: torch.Tensor, dim: int, start: int, end: int) -> torch.Tensor:
+    slices = [slice(None)] * tensor.ndim
+    slices[dim] = slice(start, end)
+    return tensor[tuple(slices)]
+
+
+def _infer_qkv_format(
+    tensor: torch.Tensor,
+    scale: torch.Tensor,
+    quant_meta: Optional[Dict[str, Any]],
+) -> str:
+    qkv_format = str((quant_meta or {}).get("qkv_format", ""))
+    if qkv_format in SUPPORTED_QKV_FORMATS:
+        return qkv_format
+    if tensor.ndim == 4 and scale.ndim == 4:
+        if scale.size(1) == 1 and scale.size(2) != 1:
+            return "BLHc"
+        if scale.size(2) == 1 and scale.size(1) != 1:
+            return "BHLc"
+    return "BLHc"
+
+
 class VAR_Q:
     def __init__(
         self,
@@ -166,7 +167,11 @@ class VAR_Q:
         eps: float = 1e-12,
         debug: bool = False,
         rescale_qk = False,
-        dequant_dtype: str = "bf16",
+        dequant_dtype: str = "native",
+        quant_compute_dtype: str = "native",
+        expected_total_seq_len: Optional[int] = None,
+        preallocate_kv_cache: bool = False,
+        dequant_workspace_policy: str = "release",
     ):
         assert qkv_format in ('BLHc','BHLc'), f"Invalid qkv_format: {qkv_format}"
         quant_method = normalize_quant_method(quant_method)
@@ -196,13 +201,17 @@ class VAR_Q:
         self.eps = eps
         self.debug = debug
         self.rescale_qk_enabled = rescale_qk
-        if dequant_dtype == "fp32":
-            self.dequant_dtype = torch.float32
-        elif dequant_dtype == "fp16":
-            self.dequant_dtype = torch.float16
-        else:
-            self.dequant_dtype = torch.bfloat16
+        if str(quant_compute_dtype) not in ("native", "fp32"):
+            raise ValueError("quant_compute_dtype must be 'native' or 'fp32'")
+        if str(dequant_workspace_policy) not in ("reuse", "release", "auto"):
+            raise ValueError("dequant_workspace_policy must be 'reuse', 'release', or 'auto'")
+        self.quant_compute_dtype = str(quant_compute_dtype)
+        self.dequant_dtype_config = dequant_dtype
+        self.dequant_dtype = resolve_dequant_dtype(dequant_dtype, fallback=torch.bfloat16)
         self.scale_dtype = torch.float16 if self.dequant_dtype == torch.float16 else torch.bfloat16
+        self.expected_total_seq_len = int(expected_total_seq_len) if expected_total_seq_len else None
+        self.preallocate_kv_cache = bool(preallocate_kv_cache)
+        self.dequant_workspace_policy = str(dequant_workspace_policy)
 
         self._qkv_format = None
         self.set_qkv_format(qkv_format)
@@ -227,7 +236,6 @@ class VAR_Q:
         self.quantized_item: Optional[torch.Tensor] = None
         self.scale: Optional[torch.Tensor] = None
         self.quant_meta: Optional[Dict[str, Any]] = None
-        self._replace_cache_on_next_cache: bool = False
 
         # pack/unpack meta (assuming c is constant across steps, so meta is constant)
         self._pack_meta: Optional[Dict[str,int]] = None  # {'orig_c','vals_per_word','pad_len','bits'}
@@ -276,19 +284,28 @@ class VAR_Q:
         self.set_qkv_format(fmt)
 
     # ---------- Basic numerical operations ----------
+    def _set_runtime_dequant_dtype(self, item_dtype: torch.dtype) -> None:
+        dtype = resolve_dequant_dtype(self.dequant_dtype_config, fallback=item_dtype)
+        if dtype != self.dequant_dtype:
+            self.dequant_dtype = dtype
+            self.scale_dtype = torch.float16 if dtype == torch.float16 else torch.bfloat16
+            self.release_dequant_workspace()
+
+    def _quant_compute_tensor(self, x: torch.Tensor) -> torch.Tensor:
+        if self.quant_compute_dtype == "fp32":
+            return x.to(torch.float32)
+        return x
+
     def _compute_scale(self, x: torch.Tensor, reduce_dims: Tuple[int,...], keepdim=True) -> torch.Tensor:
-        x32 = x.to(torch.float32)
-        max_abs = x32.abs().amax(dim=reduce_dims, keepdim=keepdim)
+        x_compute = self._quant_compute_tensor(x)
+        max_abs = x_compute.abs().amax(dim=reduce_dims, keepdim=keepdim)
         scale = (max_abs / float(self.bound_max)).clamp_min(self.eps)
         return scale.to(self.scale_dtype).detach()
 
     def _quantize_to_int8(self, x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        x32 = x.to(torch.float32)
-        q = torch.round(x32 / scale).clamp(self.bound_min, self.bound_max).to(torch.int8)
+        x_compute = self._quant_compute_tensor(x)
+        q = torch.round(x_compute / scale.to(x_compute.dtype)).clamp(self.bound_min, self.bound_max).to(torch.int8)
         return q
-
-    def _dequantize_from_int8(self, q: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        return (q.to(self.dequant_dtype) * scale.to(self.dequant_dtype)).to(self.dequant_dtype)
 
     def _seq_dim_size(self, tensor: torch.Tensor) -> int:
         return int(tensor.size(self.dim_cat))
@@ -331,12 +348,6 @@ class VAR_Q:
         q = torch.cat(q_chunks, dim=self.dim_cat)
         scale = torch.cat(scale_chunks, dim=self.dim_cat)
         return q, scale, chunk_lengths
-
-    def _to_bhld(self, tensor: torch.Tensor) -> torch.Tensor:
-        return _to_bhld_layout(tensor, self.qkv_format)
-
-    def _from_bhld(self, tensor: torch.Tensor) -> torch.Tensor:
-        return _from_bhld_layout(tensor, self.qkv_format)
 
     def _expand_scale_for_tensor(
         self,
@@ -384,7 +395,10 @@ class VAR_Q:
         if current_buffer is not None and current_capacity >= needed:
             return current_buffer
 
-        new_capacity = self._next_capacity(needed, current_capacity)
+        if self.preallocate_kv_cache and attr == "cached_item" and self.expected_total_seq_len:
+            new_capacity = max(needed, self.expected_total_seq_len)
+        else:
+            new_capacity = self._next_capacity(needed, current_capacity)
         shape = list(append_tensor.shape)
         shape[self.dim_cat] = new_capacity
         new_buffer = torch.empty(shape, dtype=append_tensor.dtype, device=append_tensor.device)
@@ -474,16 +488,38 @@ class VAR_Q:
         self._dequant_workspace = None
         self._dequant_workspace_capacity = 0
 
+    def maybe_release_dequant_workspace(self) -> None:
+        if self.dequant_workspace_policy in ("release", "auto"):
+            self.release_dequant_workspace()
+
+    def clear_cache(self, free_buffers: bool = True) -> None:
+        self.cached_len = 0
+        self.cached_scale_len = 0
+        self.cached_quant_meta = None
+        self._scale_L_counts = []
+        self._cur_scale_L_counts = []
+        self.quantized_item = None
+        self.scale = None
+        self.quant_meta = None
+        if free_buffers:
+            self.cached_item = None
+            self.cached_scale = None
+            self._cache_capacity = 0
+            self._scale_cache_capacity = 0
+            self.release_dequant_workspace()
+
     def _write_dequant_into_workspace(
         self,
         q_int8: torch.Tensor,
         scale: torch.Tensor,
         quant_meta: Optional[Dict[str, Any]],
+        out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         q_int8 = q_int8.detach()
         scale = scale.detach()
-        workspace = self._ensure_dequant_workspace(q_int8)
-        out = self._slice_along_cat(workspace, 0, int(q_int8.size(self.dim_cat)))
+        if out is None:
+            workspace = self._ensure_dequant_workspace(q_int8)
+            out = self._slice_along_cat(workspace, 0, int(q_int8.size(self.dim_cat)))
         if _is_compact_scale_meta(quant_meta):
             group_lengths = [int(v) for v in quant_meta.get("group_lengths", ())]
             if not group_lengths:
@@ -506,6 +542,106 @@ class VAR_Q:
             scale = self._expand_scale_for_tensor(scale, quant_meta, q_int8.shape)
             torch.mul(q_int8.to(self.dequant_dtype), scale.to(self.dequant_dtype), out=out)
         return out
+
+    def _ensure_dequant_workspace_shape(
+        self,
+        shape: Sequence[int],
+        device: torch.device,
+    ) -> torch.Tensor:
+        needed = int(shape[self.dim_cat])
+        workspace = self._dequant_workspace
+        compatible = (
+            workspace is not None
+            and workspace.dtype == self.dequant_dtype
+            and workspace.device == device
+            and workspace.ndim == len(shape)
+            and all(
+                workspace.size(i) == int(shape[i])
+                for i in range(len(shape))
+                if i != self.dim_cat
+            )
+        )
+        if compatible and self._dequant_workspace_capacity >= needed:
+            return workspace
+        new_capacity = self._next_capacity(needed, self._dequant_workspace_capacity if compatible else 0)
+        workspace_shape = list(int(v) for v in shape)
+        workspace_shape[self.dim_cat] = new_capacity
+        self._dequant_workspace = torch.empty(workspace_shape, dtype=self.dequant_dtype, device=device)
+        self._dequant_workspace_capacity = new_capacity
+        self._dequant_workspace_peak_bytes = max(
+            self._dequant_workspace_peak_bytes,
+            self._tensor_bytes(self._dequant_workspace),
+        )
+        return self._dequant_workspace
+
+    def _packed_output_shape(self, packed: torch.Tensor, meta: Dict[str, int]) -> List[int]:
+        shape = list(packed.shape)
+        shape[-1] = int(meta["orig_c"])
+        return shape
+
+    def _write_packed_dequant_into_workspace(
+        self,
+        packed: torch.Tensor,
+        scale: torch.Tensor,
+        quant_meta: Optional[Dict[str, Any]],
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert self._pack_meta is not None, "pack meta is missing"
+        if (
+            _HAS_TRITON
+            and packed.is_cuda
+            and int(self._pack_meta["bits"]) in TRITON_PACK_BITS
+            and unpack_dequant_last_dim_from_int32_triton is not None
+            and packed.ndim == 4
+        ):
+            packed = packed.detach()
+            scale = scale.detach()
+            if out is None:
+                workspace = self._ensure_dequant_workspace_shape(self._packed_output_shape(packed, self._pack_meta), packed.device)
+                out = self._slice_along_cat(workspace, 0, int(packed.size(self.dim_cat)))
+            if _is_compact_scale_meta(quant_meta):
+                group_lengths = [int(v) for v in quant_meta.get("group_lengths", ())]
+                if not group_lengths:
+                    group_lengths = [int(packed.size(self.dim_cat))]
+                token_start = 0
+                for scale_idx, group_len in enumerate(group_lengths):
+                    token_end = min(token_start + group_len, int(packed.size(self.dim_cat)))
+                    if token_start >= token_end:
+                        break
+                    unpack_dequant_last_dim_from_int32_triton(
+                        self._slice_along_cat(packed, token_start, token_end),
+                        self._slice_along_cat(scale, scale_idx, scale_idx + 1),
+                        self._pack_meta,
+                        self._slice_along_cat(out, token_start, token_end),
+                        self.qkv_format,
+                    )
+                    token_start = token_end
+            else:
+                unpack_dequant_last_dim_from_int32_triton(packed, scale, self._pack_meta, out, self.qkv_format)
+            return out
+
+        q_int8 = self._unpack_last_dim_from_int32(packed, self._pack_meta)
+        if out is None:
+            return self._write_dequant_into_workspace(q_int8, scale, quant_meta)
+        if _is_compact_scale_meta(quant_meta):
+            group_lengths = [int(v) for v in quant_meta.get("group_lengths", ())]
+            if not group_lengths:
+                group_lengths = [int(q_int8.size(self.dim_cat))]
+            token_start = 0
+            for scale_idx, group_len in enumerate(group_lengths):
+                token_end = min(token_start + group_len, int(q_int8.size(self.dim_cat)))
+                if token_start >= token_end:
+                    break
+                torch.mul(
+                    self._slice_along_cat(q_int8, token_start, token_end).to(self.dequant_dtype),
+                    self._slice_along_cat(scale, scale_idx, scale_idx + 1).to(self.dequant_dtype),
+                    out=self._slice_along_cat(out, token_start, token_end),
+                )
+                token_start = token_end
+        else:
+            expanded_scale = self._expand_scale_for_tensor(scale, quant_meta, q_int8.shape)
+            torch.mul(q_int8.to(self.dequant_dtype), expanded_scale.to(self.dequant_dtype), out=out)
+        return out
     
     # ---------- Pack/unpack last dimension to/from int32 ----------
     def _pack_last_dim_to_int32(self, q_int8: torch.Tensor, bits: int) -> Tuple[torch.Tensor, Dict[str,int]]:
@@ -523,9 +659,9 @@ class VAR_Q:
 
     # ---------- Main quantization process ----------
     def quant(self, item: torch.Tensor):
+        self._set_runtime_dequant_dtype(item.dtype)
         m = self.quant_method
         self.quant_meta = None
-        self._replace_cache_on_next_cache = False
         self._cur_scale_L_counts = []
         red = self.dim_map[m]
 
@@ -571,22 +707,7 @@ class VAR_Q:
 
         self.scale = scale
 
-    # ---------- Reconstruct compact scale to full L dimension ----------
     _COMPACT_SCALE_METHODS = frozenset(('VARQ', 'G_SCALE_HEAD_DIM', 'G_SCALE', 'G_TENSOR'))
-
-    def _reconstruct_scale_for_L(self, scale: torch.Tensor, target_L: int) -> torch.Tensor:
-        """Expand compact scale from (num_scales) to (L_total) along L-dim via repeat_interleave.
-
-        For compact-scale methods the cached scale has shape (..., num_scales, ...)
-        where num_scales == number of AR steps, while the quantised data has L_total
-        tokens.  This rebuilds the full-L scale as a *temporary* tensor so the
-        permanent cached_scale stays small.
-        """
-        L_dim = self.dim_cat
-        if scale.size(L_dim) >= target_L:
-            return scale
-        counts = torch.tensor(self._scale_L_counts, device=scale.device, dtype=torch.long)
-        return scale.repeat_interleave(counts, dim=L_dim)
 
     # ---------- Write cache ----------
     def cache(self):
@@ -614,35 +735,47 @@ class VAR_Q:
 
     # ---------- Dequantization ----------
     def dequant_current(self) -> torch.Tensor:
-        if self.pack_to_int32:
-            assert self._pack_meta is not None, "pack meta is missing"
-            q_int8 = self._unpack_last_dim_from_int32(self.quantized_item, self._pack_meta)
-        else:
-            q_int8 = self.quantized_item
         scale = self.scale
         quant_meta = _clone_quant_meta(self.quant_meta)
+        if self.pack_to_int32:
+            assert self._pack_meta is not None, "pack meta is missing"
+            if self.quant_method in self._COMPACT_SCALE_METHODS:
+                output_seq_len = int(self.quantized_item.size(self.dim_cat))
+                if scale.size(self.dim_cat) < output_seq_len:
+                    quant_meta = quant_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
+                    quant_meta["group_lengths"] = list(self._cur_scale_L_counts or [output_seq_len])
+            return self._write_packed_dequant_into_workspace(self.quantized_item, scale, quant_meta)
+        else:
+            q_int8 = self.quantized_item
         if self.quant_method in self._COMPACT_SCALE_METHODS and scale.size(self.dim_cat) < q_int8.size(self.dim_cat):
             quant_meta = quant_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
             quant_meta["group_lengths"] = list(self._cur_scale_L_counts or [q_int8.size(self.dim_cat)])
         return self._write_dequant_into_workspace(q_int8, scale, quant_meta)
 
-    def dequant_all(self) -> torch.Tensor:
+    def dequant_all(self, out: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.cached_item is None or self.cached_len == 0:
-            return self.dequant_current()
+            if out is None:
+                return self.dequant_current()
+            if self.pack_to_int32:
+                return self._write_packed_dequant_into_workspace(self.quantized_item, self.scale, self.quant_meta, out)
+            return self._write_dequant_into_workspace(self.quantized_item, self.scale, self.quant_meta, out)
 
         scale = self._valid_cached_scale()
         q_cached = self._valid_cached_item()
+        quant_meta = _clone_quant_meta(self.cached_quant_meta)
 
         if self.pack_to_int32:
             assert self._pack_meta is not None, "pack meta is missing"
-            q_int8 = self._unpack_last_dim_from_int32(q_cached, self._pack_meta)
+            if self.quant_method in self._COMPACT_SCALE_METHODS and scale.size(self.dim_cat) < q_cached.size(self.dim_cat):
+                quant_meta = quant_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
+                quant_meta["group_lengths"] = list(self._scale_L_counts)
+            return self._write_packed_dequant_into_workspace(q_cached, scale, quant_meta, out)
         else:
             q_int8 = q_cached
-        quant_meta = _clone_quant_meta(self.cached_quant_meta)
         if self.quant_method in self._COMPACT_SCALE_METHODS and scale.size(self.dim_cat) < q_int8.size(self.dim_cat):
             quant_meta = quant_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
             quant_meta["group_lengths"] = list(self._scale_L_counts)
-        return self._write_dequant_into_workspace(q_int8, scale, quant_meta)
+        return self._write_dequant_into_workspace(q_int8, scale, quant_meta, out)
 
     # Main external interface
     def quant_and_cache(self, item: torch.Tensor):
@@ -658,19 +791,38 @@ class VAR_Q:
                 q_cached = self._valid_cached_item()
                 if self.pack_to_int32:
                     assert self._pack_meta is not None, "pack meta is missing"
-                    q_cached = self._unpack_last_dim_from_int32(q_cached, self._pack_meta)
-                    q_current = self._unpack_last_dim_from_int32(self.quantized_item, self._pack_meta)
+                    cached_shape = self._packed_output_shape(q_cached, self._pack_meta)
+                    current_shape = self._packed_output_shape(self.quantized_item, self._pack_meta)
+                    total_shape = list(cached_shape)
+                    total_shape[self.dim_cat] = int(cached_shape[self.dim_cat]) + int(current_shape[self.dim_cat])
+                    workspace = self._ensure_dequant_workspace_shape(total_shape, q_cached.device)
+                    result = self._slice_along_cat(workspace, 0, int(total_shape[self.dim_cat]))
+                    cached_out = self._slice_along_cat(result, 0, int(cached_shape[self.dim_cat]))
+                    current_out = self._slice_along_cat(result, int(cached_shape[self.dim_cat]), int(total_shape[self.dim_cat]))
+                    cached_meta = _clone_quant_meta(self.cached_quant_meta)
+                    if self.quant_method in self._COMPACT_SCALE_METHODS:
+                        cached_meta = cached_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
+                        cached_meta["group_lengths"] = list(self._scale_L_counts)
+                    current_meta = _clone_quant_meta(self.quant_meta)
+                    if self.quant_method in self._COMPACT_SCALE_METHODS:
+                        current_meta = current_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
+                        current_meta["group_lengths"] = list(self._cur_scale_L_counts)
+                    self._write_packed_dequant_into_workspace(q_cached, self._valid_cached_scale(), cached_meta, cached_out)
+                    self._write_packed_dequant_into_workspace(self.quantized_item, self.scale, current_meta, current_out)
+                    if self.debug:
+                        self.log_memory_breakdown(prefix=f"[VAR-Q:{self.kv_role}] ")
+                    return result
                 else:
                     q_current = self.quantized_item
-                q_int8 = torch.cat([q_cached, q_current], dim=self.dim_cat)
+                    q_int8 = torch.cat([q_cached, q_current], dim=self.dim_cat)
 
-                cached_scale = self._valid_cached_scale()
-                scale = torch.cat([cached_scale, self.scale.to(self.scale_dtype)], dim=self.dim_cat)
-                quant_meta = _clone_quant_meta(self.cached_quant_meta)
-                if self.quant_method in self._COMPACT_SCALE_METHODS:
-                    quant_meta = quant_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
-                    quant_meta["group_lengths"] = list(self._scale_L_counts) + list(self._cur_scale_L_counts)
-                result = self._write_dequant_into_workspace(q_int8, scale, quant_meta)
+                    cached_scale = self._valid_cached_scale()
+                    scale = torch.cat([cached_scale, self.scale.to(self.scale_dtype)], dim=self.dim_cat)
+                    quant_meta = _clone_quant_meta(self.cached_quant_meta)
+                    if self.quant_method in self._COMPACT_SCALE_METHODS:
+                        quant_meta = quant_meta or {"scheme": "COMPACT_SCALE", "qkv_format": self.qkv_format}
+                        quant_meta["group_lengths"] = list(self._scale_L_counts) + list(self._cur_scale_L_counts)
+                    result = self._write_dequant_into_workspace(q_int8, scale, quant_meta)
             if self.debug:
                 self.log_memory_breakdown(prefix=f"[VAR-Q:{self.kv_role}] ")
             return result
@@ -697,13 +849,24 @@ class VAR_Q:
         packed_kv_bytes = self._tensor_bytes(self.cached_item, self.cached_len, self.dim_cat)
         scale_bytes = self._tensor_bytes(self.cached_scale, self.cached_scale_len, self.dim_cat)
         dequant_workspace_bytes = self._tensor_bytes(self._dequant_workspace)
+        packed_cache_allocated_bytes = self._tensor_bytes(self.cached_item)
+        scale_cache_allocated_bytes = self._tensor_bytes(self.cached_scale)
+        active_cache_bytes = packed_kv_bytes + scale_bytes
+        cache_buffer_bytes = packed_cache_allocated_bytes + scale_cache_allocated_bytes
+        current_quantized_bytes = self._tensor_bytes(self.quantized_item)
+        current_scale_bytes = self._tensor_bytes(self.scale)
         stats = {
             "packed_kv_bytes": packed_kv_bytes,
             "scale_bytes": scale_bytes,
+            "active_cache_bytes": active_cache_bytes,
             "dequant_workspace_bytes": dequant_workspace_bytes,
             "dequant_workspace_peak_bytes": int(self._dequant_workspace_peak_bytes),
-            "packed_cache_allocated_bytes": self._tensor_bytes(self.cached_item),
-            "scale_cache_allocated_bytes": self._tensor_bytes(self.cached_scale),
+            "packed_cache_allocated_bytes": packed_cache_allocated_bytes,
+            "scale_cache_allocated_bytes": scale_cache_allocated_bytes,
+            "cache_buffer_bytes": cache_buffer_bytes,
+            "current_quantized_bytes": current_quantized_bytes,
+            "current_scale_bytes": current_scale_bytes,
+            "temporary_estimated_bytes": current_quantized_bytes + current_scale_bytes + dequant_workspace_bytes,
         }
         if torch.cuda.is_available():
             stats.update(
@@ -730,8 +893,11 @@ class VAR_Q:
         print(
             prefix
             + "packed_kv_bytes={packed_kv_bytes} scale_bytes={scale_bytes} "
+            + "active_cache_bytes={active_cache_bytes} "
             + "dequant_workspace_bytes={dequant_workspace_bytes} "
             + "dequant_workspace_peak_bytes={dequant_workspace_peak_bytes} "
+            + "cache_buffer_bytes={cache_buffer_bytes} "
+            + "temporary_estimated_bytes={temporary_estimated_bytes} "
             + "cuda_memory_allocated={cuda_memory_allocated} "
             + "cuda_max_memory_allocated={cuda_max_memory_allocated} "
             + "cuda_memory_reserved={cuda_memory_reserved} "
@@ -742,16 +908,11 @@ class VAR_Q:
     def rescale_qk(self, q: torch.Tensor, k: torch.Tensor, return_theta: bool = False):
         theta = None
         if self.rescale_qk_enabled:
-            # q/k shape: (B, H, L, c), compute one rescale factor per head.
-            # range_q = q.abs().amax(dim=(0, 2, 3), keepdim=True)
-            # range_k = k.abs().amax(dim=(0, 2, 3), keepdim=True)
             range_q = q.abs().max()
             range_k = k.abs().max()
             theta = torch.sqrt((range_k + 1e-6) / (range_q + 1e-6))
             q = q * theta
             k = k / theta
-        else:
-            pass # do nothing
         if return_theta:
             return q, k, theta
         return q, k
@@ -761,9 +922,11 @@ SUPPORTED_QUANT_BITS = (2, 3, 4, 6, 8)
 SUPPORTED_QKV_FORMATS = ("BLHc", "BHLc")
 
 
-def resolve_dequant_dtype(dequant_dtype: str | torch.dtype) -> torch.dtype:
+def resolve_dequant_dtype(dequant_dtype: str | torch.dtype, fallback: Optional[torch.dtype] = None) -> torch.dtype:
     if isinstance(dequant_dtype, torch.dtype):
         return dequant_dtype
+    if dequant_dtype == "native":
+        return fallback or torch.bfloat16
     if dequant_dtype == "fp32":
         return torch.float32
     if dequant_dtype == "fp16":
@@ -774,11 +937,17 @@ def resolve_dequant_dtype(dequant_dtype: str | torch.dtype) -> torch.dtype:
 
 
 def _dequant_dtype_name(dequant_dtype: str | torch.dtype) -> str:
+    if str(dequant_dtype) == "native":
+        return "native"
     resolved = resolve_dequant_dtype(dequant_dtype)
     if resolved == torch.float32:
         return "fp32"
     if resolved == torch.float16:
         return "fp16"
+    if resolved == torch.bfloat16:
+        return "bf16"
+    if str(dequant_dtype) == "native":
+        return "native"
     return "bf16"
 
 
@@ -829,6 +998,7 @@ def quantize_tensor(
     kv_role: str = "k",
     compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
     max_scale_seq_len: Optional[int] = None,
+    quant_compute_dtype: str = "native",
     **_ignored: Any,
 ) -> Dict[str, Any]:
     validate_quantization_args(
@@ -849,13 +1019,16 @@ def quantize_tensor(
         max_scale_seq_len=max_scale_seq_len,
         pack_to_int32=pack_to_int32,
         dequant_dtype=_dequant_dtype_name(dequant_dtype),
+        quant_compute_dtype=quant_compute_dtype,
     )
     quantizer.quant(item)
+    quant_meta = _clone_quant_meta(quantizer.quant_meta) or {}
+    quant_meta.setdefault("qkv_format", qkv_format)
     return {
         "packed": quantizer.quantized_item,
         "scale": quantizer.scale,
         "pack_meta": quantizer._pack_meta if pack_to_int32 else None,
-        "quant_meta": _clone_quant_meta(quantizer.quant_meta),
+        "quant_meta": quant_meta,
     }
 
 
@@ -865,23 +1038,71 @@ def dequantize_tensor(
     pack_meta: Optional[Dict[str, int]],
     dequant_dtype: str | torch.dtype,
     quant_meta: Optional[Dict[str, Any]] = None,
+    out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    target_dtype = resolve_dequant_dtype(dequant_dtype)
+    target_dtype = resolve_dequant_dtype(dequant_dtype, fallback=scale.dtype)
+    qkv_format = _infer_qkv_format(packed, scale, quant_meta)
+    seq_dim = 1 if qkv_format == "BLHc" else 2
     if pack_meta is not None:
         if packed.dtype != torch.int32:
             raise ValueError(
                 f"Expected packed int32 tensor when pack_meta is present, got {packed.dtype}"
             )
         bits = int(pack_meta["bits"])
-        if _HAS_TRITON and packed.is_cuda and bits in TRITON_PACK_BITS:
-            q_int8 = unpack_last_dim_from_int32_triton(packed, pack_meta)
-        else:
-            q_int8 = unpack_last_dim_from_int32_python(packed, pack_meta)
+        output_shape = list(packed.shape)
+        output_shape[-1] = int(pack_meta["orig_c"])
+        if out is None:
+            out = torch.empty(output_shape, dtype=target_dtype, device=packed.device)
+        if (
+            _HAS_TRITON
+            and packed.is_cuda
+            and bits in TRITON_PACK_BITS
+            and unpack_dequant_last_dim_from_int32_triton is not None
+            and packed.ndim == 4
+        ):
+            if _is_compact_scale_meta(quant_meta):
+                group_lengths = [int(value) for value in quant_meta.get("group_lengths", ())]
+                if not group_lengths:
+                    group_lengths = [int(packed.size(seq_dim))]
+                token_start = 0
+                for scale_idx, group_len in enumerate(group_lengths):
+                    token_end = min(token_start + group_len, int(packed.size(seq_dim)))
+                    if token_end <= token_start:
+                        break
+                    unpack_dequant_last_dim_from_int32_triton(
+                        _slice_dim(packed, seq_dim, token_start, token_end),
+                        _slice_dim(scale, seq_dim, scale_idx, scale_idx + 1),
+                        pack_meta,
+                        _slice_dim(out, seq_dim, token_start, token_end),
+                        qkv_format,
+                    )
+                    token_start = token_end
+            else:
+                unpack_dequant_last_dim_from_int32_triton(packed, scale, pack_meta, out, qkv_format)
+            return out
+        q_int8 = unpack_last_dim_from_int32_python(packed, pack_meta)
     else:
         q_int8 = packed
+        if out is None:
+            out = torch.empty(q_int8.shape, dtype=target_dtype, device=q_int8.device)
     if _is_compact_scale_meta(quant_meta):
-        scale = _expand_compact_scale_for_shape(scale, quant_meta, q_int8.shape)
-    return (q_int8.to(torch.float32) * scale).to(target_dtype)
+        group_lengths = [int(value) for value in quant_meta.get("group_lengths", ())]
+        if not group_lengths:
+            group_lengths = [int(q_int8.size(seq_dim))]
+        token_start = 0
+        for scale_idx, group_len in enumerate(group_lengths):
+            token_end = min(token_start + group_len, int(q_int8.size(seq_dim)))
+            if token_end <= token_start:
+                break
+            torch.mul(
+                _slice_dim(q_int8, seq_dim, token_start, token_end).to(target_dtype),
+                _slice_dim(scale, seq_dim, scale_idx, scale_idx + 1).to(target_dtype),
+                out=_slice_dim(out, seq_dim, token_start, token_end),
+            )
+            token_start = token_end
+        return out
+    torch.mul(q_int8.to(target_dtype), scale.to(target_dtype), out=out)
+    return out
 
 
 def build_kv_cache_quantizer(
@@ -894,9 +1115,13 @@ def build_kv_cache_quantizer(
     eps: float = 1e-12,
     debug: bool = False,
     rescale_qk: bool = False,
-    dequant_dtype: str = "bf16",
+    dequant_dtype: str = "native",
+    quant_compute_dtype: str = "native",
     compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
     max_scale_seq_len: Optional[int] = None,
+    expected_total_seq_len: Optional[int] = None,
+    preallocate_kv_cache: bool = False,
+    dequant_workspace_policy: str = "release",
     **_ignored: Any,
 ) -> "VAR_Q":
     validate_quantization_args(
@@ -921,6 +1146,10 @@ def build_kv_cache_quantizer(
         debug=debug,
         rescale_qk=rescale_qk,
         dequant_dtype=dequant_dtype,
+        quant_compute_dtype=quant_compute_dtype,
+        expected_total_seq_len=expected_total_seq_len,
+        preallocate_kv_cache=preallocate_kv_cache,
+        dequant_workspace_policy=dequant_workspace_policy,
     )
 
 
@@ -945,9 +1174,13 @@ class InfinityStarVARQ:
         eps: float = 1e-12,
         debug: bool = False,
         rescale_qk: bool = False,
-        dequant_dtype: str = "bf16",
+        dequant_dtype: str = "native",
+        quant_compute_dtype: str = "native",
         compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
         max_scale_seq_len: Optional[int] = None,
+        expected_total_seq_len: Optional[int] = None,
+        preallocate_kv_cache: bool = False,
+        dequant_workspace_policy: str = "release",
     ):
         self.quant_bits = quant_bits
         self.qkv_format = qkv_format
@@ -958,8 +1191,12 @@ class InfinityStarVARQ:
         self.debug = debug
         self.rescale_qk = rescale_qk
         self.dequant_dtype = dequant_dtype
+        self.quant_compute_dtype = quant_compute_dtype
         self.compression_ratio = float(compression_ratio)
         self.max_scale_seq_len = int(max_scale_seq_len) if max_scale_seq_len is not None else None
+        self.expected_total_seq_len = int(expected_total_seq_len) if expected_total_seq_len else None
+        self.preallocate_kv_cache = bool(preallocate_kv_cache)
+        self.dequant_workspace_policy = str(dequant_workspace_policy)
 
         self._scale_quantizers: Dict[ScaleId, VAR_Q] = {}
 
@@ -974,8 +1211,12 @@ class InfinityStarVARQ:
             debug=self.debug,
             rescale_qk=self.rescale_qk,
             dequant_dtype=self.dequant_dtype,
+            quant_compute_dtype=self.quant_compute_dtype,
             compression_ratio=self.compression_ratio,
             max_scale_seq_len=self.max_scale_seq_len,
+            expected_total_seq_len=self.expected_total_seq_len,
+            preallocate_kv_cache=self.preallocate_kv_cache,
+            dequant_workspace_policy=self.dequant_workspace_policy,
         )
 
     def _ensure_quantizer(self, scale_id: ScaleId) -> VAR_Q:
@@ -1035,23 +1276,82 @@ class InfinityStarVARQ:
         cat_dim: int = 2,
     ) -> torch.Tensor:
         """
-        Dequantize selected cached scales and concatenate them (plus optional current tensor).
+        Dequantize selected cached scales directly into the final concatenated tensor.
+
+        This avoids retaining one dense workspace per referenced scale while a
+        second full-size concatenation output is allocated for attention.
         """
-        tensors: List[torch.Tensor] = [self.get_scale(sid) for sid in ref_scale_ids]
+        parts: List[Union[ScaleId, torch.Tensor]] = list(ref_scale_ids)
         if current_kv is not None:
-            tensors.append(current_kv)
-        if not tensors:
-            raise ValueError("No tensor to concatenate in get_selected()")
-        if len(tensors) == 1:
-            return tensors[0]
-        return torch.cat(tensors, dim=cat_dim)
+            parts.append(current_kv)
+        return self.materialize_selected(parts, cat_dim=cat_dim)
+
+    def materialize_selected(
+        self,
+        parts: Iterable[Union[ScaleId, torch.Tensor]],
+        cat_dim: int = 2,
+    ) -> torch.Tensor:
+        """Concatenate quantized scale IDs and already-dense tensors in one output allocation."""
+        parts = list(parts)
+        if not parts:
+            raise ValueError("No tensor to concatenate in materialize_selected()")
+        seq_dim = 1 if self.qkv_format == "BLHc" else 2
+        if cat_dim != seq_dim:
+            tensors = [part if isinstance(part, torch.Tensor) else self.get_scale(part) for part in parts]
+            return tensors[0] if len(tensors) == 1 else torch.cat(tensors, dim=cat_dim)
+
+        entries: List[Tuple[Optional[VAR_Q], Optional[torch.Tensor]]] = []
+        shapes: List[List[int]] = []
+        for part in parts:
+            if isinstance(part, torch.Tensor):
+                entries.append((None, part))
+                shapes.append(list(part.shape))
+                continue
+            sid = part
+            q = self._scale_quantizers.get(sid)
+            if q is None or q.cached_item is None or q.cached_len == 0:
+                raise KeyError(f"scale_id={sid} is not cached")
+            entries.append((q, None))
+            if q.pack_to_int32:
+                assert q._pack_meta is not None, "pack meta is missing"
+                shapes.append(q._packed_output_shape(q._valid_cached_item(), q._pack_meta))
+            else:
+                shapes.append(list(q._valid_cached_item().shape))
+
+        total_shape = list(shapes[0])
+        total_shape[cat_dim] = sum(int(shape[cat_dim]) for shape in shapes)
+        dense_part = next((dense for _q, dense in entries if dense is not None), None)
+        first_quantizer = next((q for q, _dense in entries if q is not None), None)
+        dtype = dense_part.dtype if dense_part is not None else first_quantizer.dequant_dtype
+        device = dense_part.device if dense_part is not None else first_quantizer._valid_cached_item().device
+        result = torch.empty(total_shape, dtype=dtype, device=device)
+        start = 0
+        for (q, dense), shape in zip(entries, shapes):
+            end = start + int(shape[cat_dim])
+            out_slice = _slice_dim(result, cat_dim, start, end)
+            if q is not None:
+                q.dequant_all(out=out_slice)
+            else:
+                out_slice.copy_(dense)
+            start = end
+        return result
+
+    def release_dequant_workspaces(self, scale_ids: Optional[Iterable[ScaleId]] = None) -> None:
+        ids = self._scale_quantizers.keys() if scale_ids is None else scale_ids
+        for sid in ids:
+            q = self._scale_quantizers.get(sid)
+            if q is not None:
+                q.release_dequant_workspace()
 
     def clear_scales(self, scale_ids: Iterable[ScaleId]) -> None:
         for sid in scale_ids:
             if sid in self._scale_quantizers:
+                self._scale_quantizers[sid].clear_cache(free_buffers=True)
                 del self._scale_quantizers[sid]
 
     def clear_all(self) -> None:
+        for quantizer in self._scale_quantizers.values():
+            quantizer.clear_cache(free_buffers=True)
         self._scale_quantizers.clear()
 
     def cache_bytes(self) -> Dict[str, int]:
@@ -1088,9 +1388,13 @@ def build_infinitystar_cache_quantizer(
     eps: float = 1e-12,
     debug: bool = False,
     rescale_qk: bool = False,
-    dequant_dtype: str = "bf16",
+    dequant_dtype: str = "native",
+    quant_compute_dtype: str = "native",
     compression_ratio: float = DEFAULT_COMPRESSION_RATIO,
     max_scale_seq_len: Optional[int] = None,
+    expected_total_seq_len: Optional[int] = None,
+    preallocate_kv_cache: bool = False,
+    dequant_workspace_policy: str = "release",
     **_ignored: Any,
 ) -> InfinityStarVARQ:
     validate_quantization_args(
@@ -1112,54 +1416,13 @@ def build_infinitystar_cache_quantizer(
         debug=debug,
         rescale_qk=rescale_qk,
         dequant_dtype=dequant_dtype,
+        quant_compute_dtype=quant_compute_dtype,
         compression_ratio=compression_ratio,
         max_scale_seq_len=max_scale_seq_len,
+        expected_total_seq_len=expected_total_seq_len,
+        preallocate_kv_cache=preallocate_kv_cache,
+        dequant_workspace_policy=dequant_workspace_policy,
     )
 
 
 HAS_TRITON_PACK = _HAS_TRITON
-
-if __name__ == "__main__":
-    import time, torch
-    from pack_unpack import (
-        pack_last_dim_to_int32_triton, unpack_last_dim_from_int32_triton,
-        pack_last_dim_to_int32_python, unpack_last_dim_from_int32_python
-    )
-
-    def bench_one(bits, runs=50, warmup=10):
-        B,L,H,c = 100,680,20,64
-        x = torch.randint(-(1<<(bits-1)), (1<<(bits-1)), (B,L,H,c),
-                        dtype=torch.int8, device='cuda')
-
-        # --- Triton: recompile & warmup---
-        for _ in range(warmup):
-            p, meta = pack_last_dim_to_int32_triton(x, bits)
-            xr = unpack_last_dim_from_int32_triton(p, meta)
-        torch.cuda.synchronize()
-
-        t0 = time.time()
-        for _ in range(runs):
-            p, meta = pack_last_dim_to_int32_triton(x, bits)
-            xr = unpack_last_dim_from_int32_triton(p, meta)
-        torch.cuda.synchronize()
-        t1 = time.time()
-        triton_ms = (t1 - t0) * 1000 / runs
-
-        # --- PyTorch fallback---
-        for _ in range(warmup):
-            p, meta = pack_last_dim_to_int32_python(x, bits)
-            xr = unpack_last_dim_from_int32_python(p, meta)
-        torch.cuda.synchronize()
-
-        t0 = time.time()
-        for _ in range(runs):
-            p, meta = pack_last_dim_to_int32_python(x, bits)
-            xr = unpack_last_dim_from_int32_python(p, meta)
-        torch.cuda.synchronize()
-        t1 = time.time()
-        torch_ms = (t1 - t0) * 1000 / runs
-
-        print(f"{bits}bit  Triton: {triton_ms:.3f} ms/iter   PyTorch: {torch_ms:.3f} ms/iter")
-
-    for b in (2,4,8):
-        bench_one(b)

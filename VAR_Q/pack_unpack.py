@@ -10,9 +10,7 @@ try:
 except Exception:
     _HAS_TRITON = False
     
-# Triton pack kernels only handle widths whose packed group size is a power of 2.
-# For q6, 32//6 == 5, so q6 must use the PyTorch fallback path instead.
-TRITON_PACK_BITS = (2, 4, 8)
+TRITON_PACK_BITS = (2, 3, 4, 6, 8)
 
 # ===========================
 # Triton kernels (vectorized)
@@ -25,6 +23,7 @@ if _HAS_TRITON:
         N_ROWS, C, C_OUT,
         BITS: tl.constexpr,          # 2/4/8
         VALS: tl.constexpr,          # 32//BITS
+        BLOCK_VALS: tl.constexpr,
         BLOCK_ROWS: tl.constexpr,    # tile height  (rows per program)
         BLOCK_WORDS: tl.constexpr,   # tile width   (int32 words per program)
     ):
@@ -37,12 +36,13 @@ if _HAS_TRITON:
         mask_word = word_idx < C_OUT
 
         # indices
-        offs      = tl.arange(0, VALS)                                    # [VALS]
+        offs      = tl.arange(0, BLOCK_VALS)                              # [BV]
         row_in_b  = row_idx[:, None, None] * C                            # [BR,1,1]
         row_out_b = row_idx[:, None] * C_OUT                              # [BR,1]
         base_cols = word_idx[None, :, None] * VALS + offs[None, None, :]  # [1,BW,VALS]
 
-        mask_cols = mask_row[:, None, None] & mask_word[None, :, None] & (base_cols < C)
+        mask_vals = offs[None, None, :] < VALS
+        mask_cols = mask_row[:, None, None] & mask_word[None, :, None] & mask_vals & (base_cols < C)
 
         vals_i8 = tl.load(q_ptr + row_in_b + base_cols, mask=mask_cols, other=0).to(tl.int32)  # [BR,BW,VALS]
         mask_bits = (1 << BITS) - 1
@@ -61,6 +61,7 @@ if _HAS_TRITON:
         N_ROWS, C, C_OUT,
         BITS: tl.constexpr,
         VALS: tl.constexpr,
+        BLOCK_VALS: tl.constexpr,
         BLOCK_ROWS: tl.constexpr,
         BLOCK_WORDS: tl.constexpr,
     ):
@@ -77,7 +78,7 @@ if _HAS_TRITON:
 
         words = tl.load(packed_ptr + row_in_b + word_idx[None, :], mask=mask_row[:, None] & mask_word[None, :], other=0)  # [BR,BW]
 
-        offs = tl.arange(0, VALS)                                         # [VALS]
+        offs = tl.arange(0, BLOCK_VALS)                                   # [BV]
         words_mat = words[:, :, None]                                     # [BR,BW,1]
 
         mask_bits = (1 << BITS) - 1
@@ -87,9 +88,96 @@ if _HAS_TRITON:
 
         # output columns for each small piece
         out_cols  = word_idx[None, :, None] * VALS + offs[None, None, :]       # [1,BW,VALS]
-        mask_cols = mask_row[:, None, None] & mask_word[None, :, None] & (out_cols < C)
+        mask_cols = mask_row[:, None, None] & mask_word[None, :, None] & (offs[None, None, :] < VALS) & (out_cols < C)
 
         tl.store(out_ptr + row_out_b + out_cols, pieces_s, mask=mask_cols)
+
+    @triton.jit
+    def _unpack_dequant2d_kernel(
+        packed_ptr, scale_ptr, out_ptr,
+        N_ROWS, C, C_OUT,
+        B, L, H,
+        OUT_S0, OUT_S1, OUT_S2, OUT_S3,
+        SCALE_S0, SCALE_S1, SCALE_S2, SCALE_S3,
+        SCALE_D0, SCALE_D1, SCALE_D2, SCALE_D3,
+        BITS: tl.constexpr,
+        VALS: tl.constexpr,
+        BLOCK_VALS: tl.constexpr,
+        QKV_FORMAT: tl.constexpr,
+        BLOCK_ROWS: tl.constexpr,
+        BLOCK_WORDS: tl.constexpr,
+    ):
+        pid_r = tl.program_id(0)
+        pid_c = tl.program_id(1)
+
+        row_idx = pid_r * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
+        word_idx = pid_c * BLOCK_WORDS + tl.arange(0, BLOCK_WORDS)
+        mask_row = row_idx < N_ROWS
+        mask_word = word_idx < C_OUT
+
+        row_in_b = row_idx[:, None] * C_OUT
+        words = tl.load(
+            packed_ptr + row_in_b + word_idx[None, :],
+            mask=mask_row[:, None] & mask_word[None, :],
+            other=0,
+        )
+
+        offs = tl.arange(0, BLOCK_VALS)
+        out_cols = word_idx[None, :, None] * VALS + offs[None, None, :]
+        valid = mask_row[:, None, None] & mask_word[None, :, None] & (offs[None, None, :] < VALS) & (out_cols < C)
+
+        mask_bits = (1 << BITS) - 1
+        sign_bit = 1 << (BITS - 1)
+        pieces_u = (words[:, :, None] >> (offs[None, None, :] * BITS)) & mask_bits
+        pieces_s = tl.where((pieces_u & sign_bit) != 0, pieces_u - (1 << BITS), pieces_u).to(tl.float32)
+
+        if QKV_FORMAT == 0:  # BLHc rows are ((b * L) + l) * H + h
+            b_idx = row_idx // (L * H)
+            rem = row_idx - b_idx * L * H
+            l_idx = rem // H
+            h_idx = rem - l_idx * H
+        else:  # BHLc rows are ((b * H) + h) * L + l
+            b_idx = row_idx // (H * L)
+            rem = row_idx - b_idx * H * L
+            h_idx = rem // L
+            l_idx = rem - h_idx * L
+
+        if QKV_FORMAT == 0:
+            out_offsets = (
+                b_idx[:, None, None] * OUT_S0
+                + l_idx[:, None, None] * OUT_S1
+                + h_idx[:, None, None] * OUT_S2
+                + out_cols * OUT_S3
+            )
+        else:
+            out_offsets = (
+                b_idx[:, None, None] * OUT_S0
+                + h_idx[:, None, None] * OUT_S1
+                + l_idx[:, None, None] * OUT_S2
+                + out_cols * OUT_S3
+            )
+
+        sb = tl.where(SCALE_D0 == 1, 0, b_idx)
+        sl = tl.where(SCALE_D1 == 1, 0, l_idx)
+        sh = tl.where(SCALE_D2 == 1, 0, h_idx)
+        sc = tl.where(SCALE_D3 == 1, 0, out_cols)
+        scale_offsets = (
+            sb[:, None, None] * SCALE_S0
+            + sl[:, None, None] * SCALE_S1
+            + sh[:, None, None] * SCALE_S2
+            + sc * SCALE_S3
+        )
+        scale = tl.load(scale_ptr + scale_offsets, mask=valid, other=0.0).to(tl.float32)
+        tl.store(out_ptr + out_offsets, pieces_s * scale, mask=valid)
+
+    def _vals_per_word(bits: int) -> int:
+        return 10 if bits == 3 else 32 // bits
+
+    def _block_vals(vals: int) -> int:
+        block_vals = 1
+        while block_vals < vals:
+            block_vals <<= 1
+        return block_vals
 
     def _pick_tiles(N_ROWS: int, C_out: int):
         bw = 1
@@ -116,7 +204,8 @@ def pack_last_dim_to_int32_triton(q_int8: torch.Tensor, bits: int):
     x = q_int8.contiguous()
     *lead, C = x.shape
     N_ROWS = int(x.numel() // C)
-    VALS   = 32 // bits
+    VALS   = _vals_per_word(bits)
+    BLOCK_VALS = _block_vals(VALS)
     C_out  = (C + VALS - 1) // VALS
     pad_len= C_out * VALS - C
 
@@ -129,7 +218,7 @@ def pack_last_dim_to_int32_triton(q_int8: torch.Tensor, bits: int):
     _pack2d_kernel[grid](
         x2d, out2d,
         N_ROWS, C, C_out,
-        BITS=bits, VALS=VALS,
+        BITS=bits, VALS=VALS, BLOCK_VALS=BLOCK_VALS,
         BLOCK_ROWS=BR, BLOCK_WORDS=BW,
         num_warps=warps, num_stages=2
     )
@@ -145,6 +234,7 @@ def unpack_last_dim_from_int32_triton(packed: torch.Tensor, meta: dict) -> torch
     bits  = int(meta['bits'])
     assert bits in TRITON_PACK_BITS
     VALS  = int(meta['vals_per_word'])
+    BLOCK_VALS = _block_vals(VALS)
     C_out = packed.shape[-1]
     orig_c= int(meta['orig_c'])
     y = packed.contiguous()
@@ -160,11 +250,90 @@ def unpack_last_dim_from_int32_triton(packed: torch.Tensor, meta: dict) -> torch
     _unpack2d_kernel[grid](
         y2d, out2d,
         N_ROWS, orig_c, C_out,
-        BITS=bits, VALS=VALS,
+        BITS=bits, VALS=VALS, BLOCK_VALS=BLOCK_VALS,
         BLOCK_ROWS=BR, BLOCK_WORDS=BW,
         num_warps=warps, num_stages=2
     )
     return out2d.view(*lead, orig_c)
+
+def unpack_dequant_last_dim_from_int32_triton(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    meta: dict,
+    out: torch.Tensor,
+    qkv_format: str,
+) -> torch.Tensor:
+    assert _HAS_TRITON, "Triton is not available"
+    assert packed.is_cuda and scale.is_cuda and out.is_cuda, "Triton version requires CUDA tensors"
+    assert packed.dtype == torch.int32
+    assert out.dtype in (torch.float16, torch.bfloat16, torch.float32)
+    assert qkv_format in ("BLHc", "BHLc")
+
+    bits = int(meta["bits"])
+    assert bits in TRITON_PACK_BITS
+    vals = int(meta["vals_per_word"])
+    block_vals = _block_vals(vals)
+    orig_c = int(meta["orig_c"])
+    y = packed.contiguous()
+    s = scale.contiguous()
+    if out.shape[-1] != orig_c:
+        raise ValueError(f"out last dimension must be {orig_c}, got {out.shape[-1]}")
+    if out.shape[:-1] != y.shape[:-1]:
+        raise ValueError(f"out leading shape must match packed leading shape, got {out.shape[:-1]} vs {y.shape[:-1]}")
+    if out.ndim != 4:
+        raise ValueError(f"fused dequant expects 4D KV tensors, got ndim={out.ndim}")
+
+    if qkv_format == "BLHc":
+        B, L, H, _ = out.shape
+    else:
+        B, H, L, _ = out.shape
+    C_out = y.shape[-1]
+    n_rows = int(y.numel() // C_out)
+    y2d = y.view(n_rows, C_out)
+
+    scale_shape = tuple(int(v) for v in s.shape)
+    if len(scale_shape) != 4:
+        raise ValueError(f"scale must be 4D, got shape={scale_shape}")
+    if qkv_format == "BLHc":
+        scale_strides = tuple(int(v) for v in s.stride())
+        scale_dims = scale_shape
+    else:
+        scale_strides = (int(s.stride(0)), int(s.stride(2)), int(s.stride(1)), int(s.stride(3)))
+        scale_dims = (scale_shape[0], scale_shape[2], scale_shape[1], scale_shape[3])
+    BR, BW, warps = _pick_tiles(n_rows, C_out)
+    grid = (triton.cdiv(n_rows, BR), triton.cdiv(C_out, BW))
+    _unpack_dequant2d_kernel[grid](
+        y2d,
+        s,
+        out,
+        n_rows,
+        orig_c,
+        C_out,
+        int(B),
+        int(L),
+        int(H),
+        int(out.stride(0)),
+        int(out.stride(1)),
+        int(out.stride(2)),
+        int(out.stride(3)),
+        scale_strides[0],
+        scale_strides[1],
+        scale_strides[2],
+        scale_strides[3],
+        scale_dims[0],
+        scale_dims[1],
+        scale_dims[2],
+        scale_dims[3],
+        BITS=bits,
+        VALS=vals,
+        BLOCK_VALS=block_vals,
+        QKV_FORMAT=0 if qkv_format == "BLHc" else 1,
+        BLOCK_ROWS=BR,
+        BLOCK_WORDS=BW,
+        num_warps=warps,
+        num_stages=2,
+    )
+    return out
 
 # ===========================
 # Pure-PyTorch fallback
