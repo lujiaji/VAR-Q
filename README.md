@@ -1,5 +1,9 @@
 # ⚡ VAR-Q: KV-Cache Quantization for Visual Autoregressive Generation
 
+[![CI](https://github.com/lujiaji/VAR-Q/actions/workflows/ci.yml/badge.svg?branch=varq_official)](https://github.com/lujiaji/VAR-Q/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **VAR-Q** is a lightweight KV-cache quantization method for efficient visual autoregressive generation.
 It reduces inference-time KV-cache memory while preserving generation quality, and is designed to attach to existing visual autoregressive model implementations without modifying their source code.
 
@@ -7,12 +11,12 @@ It reduces inference-time KV-cache memory while preserving generation quality, a
   <img src="assets/VAR-Q-performance.png" alt="VAR-Q performance summary" width="820">
 </p>
 
-## ⚡ Quick Start
+## ⚡ Quick Start in 60 Seconds
 
 This smoke path does not require third-party backends, checkpoints, or datasets.
 
 ```bash
-git clone git@github.com:lujiaji/VAR-Q.git
+git clone https://github.com/lujiaji/VAR-Q.git
 cd VAR-Q
 git checkout varq_official
 # Install PyTorch first from https://pytorch.org/get-started/locally/
@@ -37,23 +41,27 @@ Weight quantization methods such as GPTQ, AWQ, and related approaches are orthog
 
 ## ✨ Highlights
 
-- **Runtime hook integration**: VAR-Q is installed in memory after a backend model is built; users do not need to patch third-party repositories.
+- **Runtime hook integration**: VAR, Infinity, InfinityStar, and LiveTalk are instrumented in memory after model construction; no forked backend source is distributed.
 - **Main VAR-Q method**: supports `VARQ`, all `G_*` grouping variants, ratio-controlled grouping, pre-RoPE control, and low-bit KV cache packing/unpacking.
-- **Clean ablation boundary**: KIVI, FLexGen, and KVQuant live under `ablation/`; they do not share runtime implementation with `VAR_Q`.
-- **Backend-friendly release**: third-party model repositories, checkpoints, generated media, local tests, and experiment scratch files are ignored by default.
+- **Memory-conscious runtime**: stores compact scale metadata, avoids token-expanded scale caches, supports exact cache preallocation, and uses fused Triton unpack/dequant on CUDA when available.
+- **Clean ablation boundary**: KIVI, FLexGen, and KVQuant comparison implementations live under `ablation/`; the pip-installed core package remains `VAR_Q`.
+- **Backend-friendly release**: third-party model repositories, checkpoints, generated media, and experiment scratch files are ignored by default.
 - **Minimal core dependency**: the VAR-Q core only depends on PyTorch/Triton-level tensor operations; backend-specific environments should follow the upstream model repositories.
 
 ## 🧩 Supported Backends
 
-| Backend | Upstream repository | Default checkout | Integration |
+| Backend | Upstream repository | Default checkout | Integration path |
 | --- | --- | --- | --- |
-| VAR | https://github.com/FoundationVision/VAR | `third_party/VAR` | Runtime hook |
-| Infinity | https://github.com/FoundationVision/Infinity | `third_party/Infinity` | Runtime hook |
-| InfinityStar | https://github.com/FoundationVision/InfinityStar | `third_party/InfinityStar` | Runtime hook |
-| Self-Forcing | https://github.com/guandeh17/Self-Forcing | `third_party/Self-Forcing` | Runtime hook adapter / config launcher |
-| LongLive | https://github.com/NVlabs/LongLive | `third_party/LongLive` | Runtime hook adapter / config launcher |
+| VAR | https://github.com/FoundationVision/VAR | `third_party/VAR` | Automatic runtime hook |
+| Infinity | https://github.com/FoundationVision/Infinity | `third_party/Infinity` | Automatic runtime hook |
+| InfinityStar | https://github.com/FoundationVision/InfinityStar | `third_party/InfinityStar` | Automatic runtime hook |
+| LiveTalk | https://github.com/ChenhongyiYang/LiveTalk | `third_party/LiveTalk` | Automatic runtime hook |
+| Self-Forcing | https://github.com/guandeh17/Self-Forcing | `third_party/Self-Forcing` | `VideoKVCacheAdapter` integration API |
+| LongLive | https://github.com/NVlabs/LongLive | `third_party/LongLive` | `VideoKVCacheAdapter` integration API |
 
-VAR-Q and its ablation methods are both routed through the hook layer for supported backends. The hook layer only decides where to attach and which quantizer to build; the VAR-Q implementation remains in `VAR_Q/`, and ablations remain in `ablation/`.
+VAR, Infinity, InfinityStar, and LiveTalk entrypoints install hooks at runtime and do not require a committed patch to their upstream repositories. Self-Forcing and LongLive currently expose a backend integration adapter because their K/V tensors are owned by version-sensitive video attention loops; an upstream caller must invoke the adapter where those tensors are available.
+
+For backends using the general hook router, VAR-Q and ablation methods are selected through the same attachment point while their quantization implementations remain isolated: VAR-Q is implemented in `VAR_Q/`, and comparisons remain in `ablation/`.
 
 ## 📦 Repository Layout
 
@@ -85,7 +93,7 @@ Ignored local-only paths include `third_party/`, `temp/`, benchmark outputs, mod
 Clone VAR-Q and check out the public branch:
 
 ```bash
-git clone git@github.com:lujiaji/VAR-Q.git
+git clone https://github.com/lujiaji/VAR-Q.git
 cd VAR-Q
 git checkout varq_official
 ```
@@ -105,10 +113,10 @@ conda activate <your-backend-env>
 pip install -e .
 ```
 
-Triton is optional acceleration for low-bit pack/unpack on CUDA. Without Triton, `import VAR_Q` still works and pack/unpack falls back to the PyTorch implementation.
+Triton is optional acceleration for low-bit pack/unpack and fused unpack/dequant on CUDA. Without Triton, `import VAR_Q` still works and pack/unpack falls back to the PyTorch implementation.
 
 ```bash
-pip install triton
+pip install -e ".[triton]"
 ```
 
 For a non-editable minimal convenience install after PyTorch is already installed, `requirements-varq.txt` is retained:
@@ -136,11 +144,12 @@ Clone upstream repositories into `third_party/`:
 git clone https://github.com/FoundationVision/VAR third_party/VAR
 git clone https://github.com/FoundationVision/Infinity third_party/Infinity
 git clone https://github.com/FoundationVision/InfinityStar third_party/InfinityStar
+git clone https://github.com/ChenhongyiYang/LiveTalk third_party/LiveTalk
 git clone https://github.com/guandeh17/Self-Forcing third_party/Self-Forcing
 git clone https://github.com/NVlabs/LongLive third_party/LongLive
 ```
 
-No `git apply`, patch marker, or source edit is required. Runtime entrypoints load the third-party model, call `install_varq_hooks(...)`, and then run the backend's normal inference path.
+VAR-Q does not vendor third-party source or distribute patch files. VAR, Infinity, InfinityStar, and LiveTalk launchers load the backend model and install hooks in memory. Self-Forcing and LongLive use the adapter API shown below until stable automatic hook signatures are available for those backends.
 
 Checkpoints are intentionally not stored in JSON configs. Provide them through command-line arguments, environment variables, or the upstream backend's native loader.
 
@@ -172,9 +181,17 @@ remove_varq_hooks(handle)
 
 Use `quant_method="VARQ"` or any `G_*` method for the main method. Use `KIVI`, `FLexGen`, or `KVQuant` in public configs for ablations; the loader normalizes them to isolated ablation implementations.
 
-For next-frame video backends whose attention internals differ across releases
-such as Self-Forcing and LongLive, use the backend-agnostic KV adapter inside
-the backend attention path after K/V tensors are produced:
+LiveTalk uses a dedicated hook installer for its chunk-overwrite cache semantics:
+
+```python
+from VAR_Q.hooks import install_livetalk_hooks, remove_livetalk_hooks
+
+handle = install_livetalk_hooks(pipeline, quant_config)
+# Run LiveTalk generation.
+remove_livetalk_hooks(handle)
+```
+
+For next-frame video backends whose attention internals differ across releases, such as Self-Forcing and LongLive, use the backend-agnostic KV adapter inside the backend attention path after K/V tensors are produced:
 
 ```python
 from VAR_Q.hooks import VideoKVCacheAdapter
@@ -197,6 +214,20 @@ k, v = kv_adapter.update(
 The adapter supports the same `VARQ`, `G_*`, `KIVI`, `FLexGen`, and `KVQuant`
 method names, keeps `max_scale_seq_len=1560` as the default video chunk unit,
 and skips persistent caching for the final chunk by default.
+
+This adapter is a public integration API rather than an automatic hook: a backend wrapper or upstream integration point must call `update(...)`.
+
+## 🧠 Memory-Efficient Runtime
+
+VAR-Q reduces active cache allocations in addition to reporting packed byte counts:
+
+- Scale metadata is stored compactly per group rather than expanded over every token.
+- Packed K/V buffers can be preallocated with `expected_total_seq_len` and `preallocate_kv_cache` when the generation length is known.
+- `quant_compute_dtype="native"` and `dequant_dtype="native"` avoid unnecessary full-size FP32 or cast temporaries.
+- CUDA + Triton uses fused unpack/dequant for supported low-bit formats; CPU and non-Triton execution retain the PyTorch fallback.
+- `dequant_workspace_policy="release"` avoids retaining dense dequant workspaces between attention calls.
+
+For memory measurements, enable the entrypoint's profiling option where available. Reports include packed K/V bytes, scale bytes, dequant workspace bytes, and PyTorch allocated/reserved peaks. Compare backends using identical prompts, generation schedules, batch size, dtype, and a clean CUDA device.
 
 ## 🎯 Inference Scripts
 
@@ -245,6 +276,15 @@ LongLive follows the same pattern:
 bash scripts/inference_LongLive.sh \
   configs/longlive/varq/base/LL-VARQ-4.json \
   -- python <upstream_longlive_inference.py> <upstream args>
+```
+
+LiveTalk:
+
+```bash
+python scripts/run_livetalk_varq.py \
+  --checkpoint_root /path/to/livetalk/checkpoints \
+  --bits 4 \
+  --output scripts/output/livetalk_varq_demo.mp4
 ```
 
 If a required third-party checkout is missing, launchers fail early and print the expected `third_party/<repo>` path.
@@ -306,9 +346,11 @@ The smoke tests cover pack/unpack, quant/dequant shape checks, config loading, a
 ## 🗺️ TODO
 
 - Support more visual autoregressive backends.
+- Promote Self-Forcing and LongLive from adapter integration to automatic runtime hooks.
 - Improve GPU memory fragmentation behavior during long generation.
 - Add more backend version signatures for robust hook detection.
-- Add fused kernels for common low-bit KV packing/unpacking paths.
+- Extend fused kernels and attention-path workspace reuse for additional backends.
+- Publish standardized end-to-end memory and throughput benchmarks.
 - Expand end-to-end smoke tests for video generation backends.
 - Add config inheritance/snippet support so repeated quantization blocks can be shared more compactly.
 

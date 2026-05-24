@@ -33,9 +33,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/VAR-Q/VAR-Q"
-Documentation = "https://github.com/VAR-Q/VAR-Q#readme"
-Issues = "https://github.com/VAR-Q/VAR-Q/issues"
+Homepage = "https://github.com/lujiaji/VAR-Q"
+Documentation = "https://github.com/lujiaji/VAR-Q#readme"
+Issues = "https://github.com/lujiaji/VAR-Q/issues"
 
 [tool.setuptools.packages.find]
 include = ["VAR_Q*"]
