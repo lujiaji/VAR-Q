@@ -4,7 +4,6 @@ Configuration loader for VAR-Q model
 import json
 import os
 from typing import Dict, Any, Tuple
-import torch
 
 
 _LEGACY_ABLATION_METHOD_MAP = {
@@ -99,7 +98,11 @@ class VARQConfig:
     def get_device(self) -> str:
         """Get device configuration"""
         device = self.config['inference']['device']
-        if device == 'cuda' and not torch.cuda.is_available():
+        if device == 'cuda':
+            import torch
+
+            if torch.cuda.is_available():
+                return device
             return 'cpu'
         return device
     
