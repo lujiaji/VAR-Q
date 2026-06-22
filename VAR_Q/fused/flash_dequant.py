@@ -141,6 +141,88 @@ def _packed_fa2_fwd_kernel(
     tl.store(o_ptrs, acc.to(tl.float16), mask=offs_m[:, None] < M)
 
 
+@triton.jit
+def _two_segment_fa2_fwd_kernel(
+    Q, KPacked, VPacked, KScale, VScale, StepIds, KFresh, VFresh, Out,
+    stride_qb, stride_qh, stride_qm, stride_qd,
+    stride_kpb, stride_kph, stride_kpn, stride_kpw,
+    stride_vpb, stride_vph, stride_vpn, stride_vpw,
+    stride_ksb, stride_kss, stride_ksh, stride_ksd,
+    stride_vsb, stride_vss, stride_vsh, stride_vsd,
+    stride_kfb, stride_kfh, stride_kfn, stride_kfd,
+    stride_vfb, stride_vfh, stride_vfn, stride_vfd,
+    stride_ob, stride_oh, stride_om, stride_od,
+    H, M, N_cached, N_fresh, sm_scale,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    D: tl.constexpr, BITS: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+    b = pid_bh // H
+    h = pid_bh % H
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, D)
+    q_ptrs = (Q + b * stride_qb + h * stride_qh
+              + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd)
+    q = tl.load(q_ptrs, mask=offs_m[:, None] < M, other=0.0).to(tl.float32)
+
+    m_i = tl.full([BLOCK_M], -float("inf"), tl.float32)
+    l_i = tl.zeros([BLOCK_M], tl.float32)
+    acc = tl.zeros([BLOCK_M, D], tl.float32)
+
+    for start_n in range(0, N_cached, BLOCK_N):
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        k = _dequant_tile(
+            KPacked, KScale + b * stride_ksb, StepIds,
+            b * stride_kpb, h * stride_kph, h, stride_kpn, stride_kpw,
+            stride_ksb, stride_kss, stride_ksh, stride_ksd,
+            offs_n, N_cached, D, BITS,
+        )
+        qk = tl.dot(q, tl.trans(k)) * sm_scale
+        qk = tl.where(offs_n[None, :] < N_cached, qk, -float("inf"))
+
+        m_new = tl.maximum(m_i, tl.max(qk, 1))
+        p = tl.exp(qk - m_new[:, None])
+        alpha = tl.exp(m_i - m_new)
+        l_i = l_i * alpha + tl.sum(p, 1)
+        acc = acc * alpha[:, None]
+
+        v = _dequant_tile(
+            VPacked, VScale + b * stride_vsb, StepIds,
+            b * stride_vpb, h * stride_vph, h, stride_vpn, stride_vpw,
+            stride_vsb, stride_vss, stride_vsh, stride_vsd,
+            offs_n, N_cached, D, BITS,
+        )
+        acc += tl.dot(p.to(v.dtype), v)
+        m_i = m_new
+
+    for start_n in range(0, N_fresh, BLOCK_N):
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        k_ptrs = (KFresh + b * stride_kfb + h * stride_kfh
+                  + offs_n[:, None] * stride_kfn + offs_d[None, :] * stride_kfd)
+        k = tl.load(k_ptrs, mask=offs_n[:, None] < N_fresh, other=0.0).to(tl.float32)
+        qk = tl.dot(q, tl.trans(k)) * sm_scale
+        qk = tl.where(offs_n[None, :] < N_fresh, qk, -float("inf"))
+
+        m_new = tl.maximum(m_i, tl.max(qk, 1))
+        p = tl.exp(qk - m_new[:, None])
+        alpha = tl.exp(m_i - m_new)
+        l_i = l_i * alpha + tl.sum(p, 1)
+        acc = acc * alpha[:, None]
+
+        v_ptrs = (VFresh + b * stride_vfb + h * stride_vfh
+                  + offs_n[:, None] * stride_vfn + offs_d[None, :] * stride_vfd)
+        v = tl.load(v_ptrs, mask=offs_n[:, None] < N_fresh, other=0.0).to(tl.float32)
+        acc += tl.dot(p.to(v.dtype), v)
+        m_i = m_new
+
+    acc = acc / l_i[:, None]
+    o_ptrs = (Out + b * stride_ob + h * stride_oh
+              + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od)
+    tl.store(o_ptrs, acc.to(tl.float16), mask=offs_m[:, None] < M)
+
+
 def _plain_attention(q, k, v, block_m=64, block_n=64):
     """q,k,v in BHLc [B,H,L,D] fp16. Returns [B,H,Lq,D] fp16."""
     B, H, M, D = q.shape
@@ -181,6 +263,35 @@ def _packed_attention(
         v_scale.stride(0), v_scale.stride(2), v_scale.stride(1), v_scale.stride(3),
         out.stride(0), out.stride(1), out.stride(2), out.stride(3),
         H, M, N, sm_scale,
+        BLOCK_M=block_m, BLOCK_N=block_n, D=D, BITS=bits,
+    )
+    return out
+
+
+def _two_segment_attention(
+    q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, bits,
+    block_m=64, block_n=32,
+):
+    """q/fresh in BHLc, packed K/V in [B,H,Lcached,W]. Returns fp16 BHLc."""
+    if bits != 8:
+        raise NotImplementedError("Task 4 implements q8 two-segment attention only")
+    B, H, M, D = q.shape
+    N_cached = k_packed.shape[2]
+    N_fresh = k_fresh.shape[2]
+    out = torch.empty_like(q)
+    sm_scale = 1.0 / math.sqrt(D)
+    grid = (triton.cdiv(M, block_m), B * H)
+    _two_segment_fa2_fwd_kernel[grid](
+        q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, out,
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+        k_packed.stride(0), k_packed.stride(1), k_packed.stride(2), k_packed.stride(3),
+        v_packed.stride(0), v_packed.stride(1), v_packed.stride(2), v_packed.stride(3),
+        k_scale.stride(0), k_scale.stride(2), k_scale.stride(1), k_scale.stride(3),
+        v_scale.stride(0), v_scale.stride(2), v_scale.stride(1), v_scale.stride(3),
+        k_fresh.stride(0), k_fresh.stride(1), k_fresh.stride(2), k_fresh.stride(3),
+        v_fresh.stride(0), v_fresh.stride(1), v_fresh.stride(2), v_fresh.stride(3),
+        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+        H, M, N_cached, N_fresh, sm_scale,
         BLOCK_M=block_m, BLOCK_N=block_n, D=D, BITS=bits,
     )
     return out
