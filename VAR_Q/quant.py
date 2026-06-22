@@ -716,7 +716,7 @@ class VAR_Q:
         s_cur = self.scale          # compact — do NOT expand along L
         meta_cur = _clone_quant_meta(self.quant_meta)
 
-        if m in ('VARQ', 'G_SCALE_HEAD_DIM', 'G_SCALE', 'G_TOKEN', 'G_TOKEN_HEAD', 'G_TENSOR'):
+        if m in ('VARQ', 'G_SCALE_HEAD_DIM', 'G_SCALE', 'G_TOKEN', 'G_TOKEN_HEAD'):
             self._append_cached_item(q_cur)
             self._append_cached_scale(s_cur)
             if meta_cur is not None:
