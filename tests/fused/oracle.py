@@ -32,6 +32,33 @@ def build_varq_cache(patch_list, B, H, D, bits, fmt, device, kv_role):
     return q, ref
 
 
+def extract_packed(q):
+    """Pull the raw packed buffers a fused kernel consumes from a VAR_Q cache.
+
+    Returns dict with packed int32 cache [B,H,L,W] (W=D//4 for q8), compact
+    scale [B,H,num_steps,D], and per-step token counts (group lengths).
+    """
+    packed = q._valid_cached_item().contiguous()   # int32
+    scale = q._valid_cached_scale().contiguous()    # fp16/bf16 compact
+    group_lengths = list(q._scale_L_counts)
+    return {
+        "packed": packed,
+        "scale": scale.to(torch.float16),
+        "group_lengths": group_lengths,
+        "pack_meta": dict(q._pack_meta),
+    }
+
+
+def step_ids_from_groups(group_lengths, device):
+    """[L] int32 mapping each token to its step index (for scale lookup)."""
+    ids = torch.empty(sum(group_lengths), dtype=torch.int32, device=device)
+    pos = 0
+    for s, n in enumerate(group_lengths):
+        ids[pos:pos + n] = s
+        pos += n
+    return ids
+
+
 def to_bhld(t, fmt):
     """Normalize a KV/Q tensor to [B,H,L,D] for the reference math."""
     if fmt == "BHLc":
