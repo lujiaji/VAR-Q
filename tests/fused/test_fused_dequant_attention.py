@@ -111,3 +111,21 @@ def test_two_segment_both_layouts(fmt):
         q, torch.cat([ref_k, fk], dim=2 if fmt == "BHLc" else 1),
         torch.cat([ref_v, fv], dim=2 if fmt == "BHLc" else 1), fmt)
     torch.testing.assert_close(out, ref, atol=3e-2, rtol=3e-2)
+
+
+@cuda
+def test_public_wrapper_matches_oracle():
+    from VAR_Q.fused import fused_dequant_attention
+    B, H, D, fmt, bits = 1, 4, 128, "BHLc", 8
+    dev = "cuda"
+    torch.manual_seed(0)
+    patch = [1, 2, 4, 6, 8]
+    kq, ref_k = oracle.build_varq_cache(patch, B, H, D, bits, fmt, dev, "k")
+    vq, ref_v = oracle.build_varq_cache(patch, B, H, D, bits, fmt, dev, "v")
+    fk = oracle.make_kv_tensor(B, H, 64, D, fmt, dev)
+    fv = oracle.make_kv_tensor(B, H, 64, D, fmt, dev)
+    q = oracle.make_kv_tensor(B, H, 64, D, fmt, dev)
+    out = fused_dequant_attention(q, kq, vq, fk, fv, qkv_format=fmt)
+    ref = oracle.ref_attention(
+        q, torch.cat([ref_k, fk], dim=2), torch.cat([ref_v, fv], dim=2), fmt)
+    torch.testing.assert_close(out, ref, atol=3e-2, rtol=3e-2)

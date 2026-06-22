@@ -325,5 +325,30 @@ def _two_segment_attention(
     return out
 
 
-def fused_dequant_attention(*args, **kwargs):  # filled in Task 6
-    raise NotImplementedError("implemented in Task 6")
+def _build_step_ids(group_lengths, device):
+    ids = torch.empty(sum(group_lengths), dtype=torch.int32, device=device)
+    pos = 0
+    for s, n in enumerate(group_lengths):
+        ids[pos:pos + n] = s
+        pos += n
+    return ids
+
+
+def fused_dequant_attention(q, k_quant, v_quant, k_fresh, v_fresh,
+                            qkv_format="BHLc"):
+    """Fused dequant + FA2 for one AR step.
+
+    q, k_fresh, v_fresh: fp16 in qkv_format. k_quant/v_quant: VAR_Q with a
+    packed VARQ cache. Returns attention output in qkv_format, fp16.
+    """
+    bits = int(k_quant.quant_bits)
+    k_packed = k_quant._valid_cached_item().contiguous()
+    v_packed = v_quant._valid_cached_item().contiguous()
+    k_scale = k_quant._valid_cached_scale().contiguous().to(torch.float16)
+    v_scale = v_quant._valid_cached_scale().contiguous().to(torch.float16)
+    group_lengths = list(k_quant._scale_L_counts)
+    step_ids = _build_step_ids(group_lengths, q.device)
+    return _two_segment_attention(
+        q, k_packed, v_packed, k_scale, v_scale, step_ids,
+        k_fresh, v_fresh, bits, fmt=qkv_format,
+    )
