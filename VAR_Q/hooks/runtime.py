@@ -42,6 +42,7 @@ class HookHandle:
     model_type: str
     modules: List[nn.Module] = field(default_factory=list)
     patched_attributes: List[_PatchedAttribute] = field(default_factory=list)
+    hit_count: int = 0
 
 
 def _get_ablation_api() -> Tuple[Callable[..., Any], Callable[..., Any], Callable[[str], bool]]:
@@ -138,6 +139,22 @@ def _iter_attention_modules(model: nn.Module, model_type: str) -> Iterable[Tuple
                 yield name, module
         elif all(hasattr(module, attr) for attr in ("mat_qkv", "q_bias", "v_bias", "proj")):
             yield name, module
+
+
+def _attention_discovery_requirements(model_type: str) -> str:
+    if model_type == "infinitystar":
+        return "class name SelfAttention with q_proj/k_proj/v_proj/o_proj attributes"
+    return "class name SelfAttention with mat_qkv/q_bias/v_bias/proj attributes"
+
+
+def _no_attention_hits_error(model_type: str, scanned_modules: int) -> RuntimeError:
+    requirements = _attention_discovery_requirements(model_type)
+    return RuntimeError(
+        f"VAR-Q runtime hooks patched 0 attention modules for model_type={model_type}; "
+        f"scanned {scanned_modules} modules. No module matched {requirements}. "
+        "Check the target model version, class names, projection attribute names, and model_type; "
+        "if the backend changed, update VAR_Q/hooks/runtime.py discovery before trusting hook results."
+    )
 
 
 def _patch_builder_globals(module: nn.Module, model_type: str) -> None:
@@ -288,6 +305,112 @@ def _attention_enabled(module: nn.Module) -> bool:
     return bool(getattr(module, "caching", False)) and bool(getattr(module, "enable_quantization", False))
 
 
+def _shape_tuple(tensor: torch.Tensor) -> Tuple[int, ...]:
+    return tuple(int(dim) for dim in tensor.shape)
+
+
+def _linear_out_features(proj: Any) -> Optional[int]:
+    weight = getattr(proj, "weight", None)
+    if isinstance(weight, torch.Tensor) and weight.ndim >= 1:
+        return int(weight.shape[0])
+    out_features = getattr(proj, "out_features", None)
+    if out_features is None:
+        return None
+    return int(out_features)
+
+
+def _infer_projected_heads(module: nn.Module, role: str) -> Optional[int]:
+    head_dim = int(getattr(module, "head_dim", 0) or 0)
+    if head_dim <= 0:
+        return None
+    proj_attr = {"q": "q_proj", "k": "k_proj", "v": "v_proj"}.get(role)
+    if proj_attr and hasattr(module, proj_attr):
+        out_features = _linear_out_features(getattr(module, proj_attr))
+        if out_features is not None and out_features % head_dim == 0:
+            return int(out_features // head_dim)
+    mat_qkv = getattr(module, "mat_qkv", None)
+    out_features = _linear_out_features(mat_qkv)
+    if out_features is not None and out_features % (3 * head_dim) == 0:
+        return int(out_features // (3 * head_dim))
+    return None
+
+
+def _infer_expected_heads(module: nn.Module, role: str) -> Optional[int]:
+    if role in ("k", "v") and hasattr(module, "num_key_value_heads"):
+        value = getattr(module, "num_key_value_heads")
+        if value is not None:
+            return int(value)
+    if hasattr(module, "num_heads"):
+        value = getattr(module, "num_heads")
+        if value is not None:
+            return int(value)
+    return _infer_projected_heads(module, role)
+
+
+def _expected_heads_for_layout_check(module: nn.Module, role: str) -> Optional[int]:
+    attr = f"_varq_expected_{role}_heads"
+    if hasattr(module, attr):
+        return int(getattr(module, attr))
+    return _infer_expected_heads(module, role)
+
+
+def _validate_hidden_states_3d(tensor: torch.Tensor, wrapper_name: str) -> None:
+    if tensor.ndim != 3:
+        raise RuntimeError(
+            f"{wrapper_name} VAR-Q runtime hook expected hidden states with shape=(B, L, C); "
+            f"got shape={_shape_tuple(tensor)}."
+        )
+
+
+def _format_qkv_shapes(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> str:
+    return f"q.shape={_shape_tuple(q)}, k.shape={_shape_tuple(k)}, v.shape={_shape_tuple(v)}"
+
+
+def _validate_qkv_layout(
+    module: nn.Module,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    qkv_format: str,
+    expected_seq_len: int,
+    wrapper_name: str,
+) -> None:
+    if qkv_format == "BLHc":
+        seq_dim, head_dim = 1, 2
+    elif qkv_format == "BHLc":
+        seq_dim, head_dim = 2, 1
+    else:
+        raise RuntimeError(
+            f"{wrapper_name} VAR-Q runtime hook expected layout=BLHc or BHLc; "
+            f"got layout={qkv_format}, {_format_qkv_shapes(q, k, v)}."
+        )
+
+    for role, tensor in (("q", q), ("k", k), ("v", v)):
+        if tensor.ndim != 4:
+            raise RuntimeError(
+                f"{wrapper_name} VAR-Q runtime hook expected layout={qkv_format} with 4D Q/K/V tensors; "
+                f"got {role}.ndim={tensor.ndim}, {_format_qkv_shapes(q, k, v)}."
+            )
+        if int(tensor.size(seq_dim)) != int(expected_seq_len):
+            raise RuntimeError(
+                f"{wrapper_name} VAR-Q runtime hook expected layout={qkv_format} with seq_dim={seq_dim} "
+                f"size={expected_seq_len}; got {role}.size({seq_dim})={int(tensor.size(seq_dim))}, "
+                f"{_format_qkv_shapes(q, k, v)}."
+            )
+        expected_heads = _expected_heads_for_layout_check(module, role)
+        # Some third-party modules do not expose stable head metadata or linear
+        # projection widths. In that case the hook still checks ndim and the
+        # sequence axis, but cannot cheaply prove the H axis.
+        if expected_heads is None:
+            continue
+        if int(tensor.size(head_dim)) != int(expected_heads):
+            raise RuntimeError(
+                f"{wrapper_name} VAR-Q runtime hook expected layout={qkv_format} with head_dim={head_dim} "
+                f"size={expected_heads}; got {role}.size({head_dim})={int(tensor.size(head_dim))}, "
+                f"{_format_qkv_shapes(q, k, v)}."
+            )
+
+
 def _has_rope_cache(rope_cache: Any) -> bool:
     if rope_cache is None:
         return False
@@ -314,6 +437,7 @@ def _wrap_var_forward(handle: HookHandle, module: nn.Module) -> None:
         if not _attention_enabled(self):
             return original(x, attn_bias)
 
+        _validate_hidden_states_3d(x, "VAR")
         B, L, C = x.shape
         cache_current = not _var_is_last_scale(self, L)
         qkv = F.linear(
@@ -326,6 +450,7 @@ def _wrap_var_forward(handle: HookHandle, module: nn.Module) -> None:
         if getattr(self, "using_flash", False):
             q, k, v = qkv.unbind(dim=2)
             qkv_format = "BLHc"
+            _validate_qkv_layout(self, q, k, v, qkv_format, L, "VAR")
             if getattr(self, "attn_l2_norm", False):
                 scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
                 scale_mul = scale_mul.transpose(1, 2)
@@ -346,6 +471,7 @@ def _wrap_var_forward(handle: HookHandle, module: nn.Module) -> None:
         elif getattr(self, "using_xform", False):
             q, k, v = qkv.unbind(dim=2)
             qkv_format = "BLHc"
+            _validate_qkv_layout(self, q, k, v, qkv_format, L, "VAR")
             if getattr(self, "attn_l2_norm", False):
                 scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
                 scale_mul = scale_mul.transpose(1, 2)
@@ -364,6 +490,7 @@ def _wrap_var_forward(handle: HookHandle, module: nn.Module) -> None:
         else:
             q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0)
             qkv_format = "BHLc"
+            _validate_qkv_layout(self, q, k, v, qkv_format, L, "VAR")
             if getattr(self, "attn_l2_norm", False):
                 scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
                 q = F.normalize(q, dim=-1).mul(scale_mul)
@@ -400,6 +527,7 @@ def _wrap_infinity_forward(handle: HookHandle, module: nn.Module) -> None:
         if not _attention_enabled(self):
             return original(x, attn_bias_or_two_vector, attn_fn=attn_fn, scale_schedule=scale_schedule, rope2d_freqs_grid=rope2d_freqs_grid, scale_ind=scale_ind)
 
+        _validate_hidden_states_3d(x, "Infinity")
         B, L, C = x.shape
         qkv = F.linear(
             input=x,
@@ -411,11 +539,10 @@ def _wrap_infinity_forward(handle: HookHandle, module: nn.Module) -> None:
         if getattr(self, "using_flash", False):
             q, k, v = qkv.unbind(dim=2)
             qkv_format = "BLHc"
-            L_dim = 1
         else:
             q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(dim=0)
             qkv_format = "BHLc"
-            L_dim = 2
+        _validate_qkv_layout(self, q, k, v, qkv_format, L, "Infinity")
 
         if getattr(self, "cos_attn", False):
             scale_mul = self.scale_mul_1H11.clamp_max(self.max_scale_mul).exp()
@@ -505,6 +632,7 @@ def _wrap_infinitystar_forward(handle: HookHandle, module: nn.Module) -> None:
                 ref_text_scale_inds=[] if ref_text_scale_inds is None else ref_text_scale_inds,
             )
 
+        _validate_hidden_states_3d(x, "InfinityStar")
         ref_text_scale_inds = [] if ref_text_scale_inds is None else ref_text_scale_inds
         bsz, q_len, _ = x.size()
         query_states = self.q_proj(x)
@@ -515,6 +643,7 @@ def _wrap_infinitystar_forward(handle: HookHandle, module: nn.Module) -> None:
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         query_states = self.q_norm(query_states)
         key_states = self.k_norm(key_states)
+        _validate_qkv_layout(self, query_states, key_states, value_states, "BHLc", q_len, "InfinityStar")
 
         apply_rotary_emb = globals_dict.get("apply_rotary_emb")
         if _has_rope_cache(rope2d_freqs_grid):
@@ -656,15 +785,18 @@ def _sp_active(sp_manager: Any) -> bool:
     return False
 
 
-def _wrap_forward(handle: HookHandle, module: nn.Module, model_type: str) -> None:
+def _wrap_forward(handle: HookHandle, module: nn.Module, model_type: str) -> bool:
     if not hasattr(module, "forward"):
-        return
+        return False
     if model_type == "var":
         _wrap_var_forward(handle, module)
     elif model_type == "infinity":
         _wrap_infinity_forward(handle, module)
     elif model_type == "infinitystar":
         _wrap_infinitystar_forward(handle, module)
+    else:
+        return False
+    return True
 
 
 def _configure_attention(
@@ -711,6 +843,10 @@ def _configure_attention(
         "_varq_runtime_hooked": True,
         "_varq_hook_model_type": model_type,
     }
+    for role in ("q", "k", "v"):
+        expected_heads = _infer_expected_heads(module, role)
+        if expected_heads is not None:
+            scalar_attrs[f"_varq_expected_{role}_heads"] = expected_heads
     if model_type == "infinitystar":
         scalar_attrs.update(
             {
@@ -820,6 +956,7 @@ def install_varq_hooks(
     model_type: str,
     quant_config: Optional[Dict[str, Any]],
     ablation_config: Optional[Dict[str, Any]] = None,
+    require_hits: bool = True,
 ) -> HookHandle:
     normalized_type = str(model_type).lower()
     if normalized_type not in SUPPORTED_MODEL_TYPES:
@@ -834,6 +971,7 @@ def install_varq_hooks(
     handle = HookHandle(model=model, model_type=normalized_type)
     last_scale_seq_len = _last_scale_seq_len(model, normalized_type, cfg)
     expected_total_seq_len = _expected_total_seq_len(model, normalized_type, cfg)
+    scanned_modules = sum(1 for _ in model.named_modules())
     attention_modules = list(_iter_attention_modules(model, normalized_type))
     last_attention_order_idx = len(attention_modules) - 1
     for block_idx, (_name, module) in enumerate(attention_modules):
@@ -848,13 +986,11 @@ def install_varq_hooks(
             _set_attr(handle, module, "preallocate_kv_cache", bool(cfg.get("preallocate_kv_cache", True)))
         if hasattr(module, "kv_caching"):
             _wrap_kv_caching(handle, module, normalized_type)
-        _wrap_forward(handle, module, normalized_type)
-        handle.modules.append(module)
-    if not handle.modules:
-        raise RuntimeError(
-            f"No supported attention modules found for model_type={model_type}. "
-            "Check that the third-party model version exposes SelfAttention modules with the expected projection attributes."
-        )
+        if _wrap_forward(handle, module, normalized_type):
+            handle.modules.append(module)
+    handle.hit_count = len(handle.modules)
+    if require_hits and handle.hit_count == 0:
+        raise _no_attention_hits_error(normalized_type, scanned_modules)
     _set_attr(handle, model, "_varq_hook_handle", handle)
     return handle
 
