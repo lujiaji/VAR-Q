@@ -242,26 +242,48 @@ def _plain_attention(q, k, v, block_m=64, block_n=64):
     return out
 
 
+def _layout_dims(fmt):
+    if fmt == "BHLc":
+        return 1, 2
+    if fmt == "BLHc":
+        return 2, 1
+    raise ValueError(f"Unsupported qkv layout: {fmt}")
+
+
+def _scale_strides(scale, H):
+    if scale.shape[1] == H:
+        return scale.stride(0), scale.stride(2), scale.stride(1), scale.stride(-1)
+    if scale.shape[2] == H:
+        return scale.stride(0), scale.stride(1), scale.stride(2), scale.stride(-1)
+    raise ValueError(f"Scale tensor shape {tuple(scale.shape)} does not match H={H}")
+
+
 def _packed_attention(
     q, k_packed, v_packed, k_scale, v_scale, step_ids, bits,
-    block_m=64, block_n=32,
+    block_m=64, block_n=32, fmt="BHLc",
 ):
-    """q in BHLc [B,H,Lq,D], packed K/V in [B,H,Lkv,W]. Returns fp16 BHLc."""
+    """q in BHLc/BLHc, packed K/V in matching layout. Returns fp16 in q layout."""
     if bits != 8:
         raise NotImplementedError("Task 3 implements q8 packed attention only")
-    B, H, M, D = q.shape
-    N = k_packed.shape[2]
+    head_dim, seq_dim = _layout_dims(fmt)
+    B = q.shape[0]
+    H = q.shape[head_dim]
+    M = q.shape[seq_dim]
+    D = q.shape[-1]
+    N = k_packed.shape[seq_dim]
     out = torch.empty_like(q)
     sm_scale = 1.0 / math.sqrt(D)
     grid = (triton.cdiv(M, block_m), B * H)
+    k_scale_strides = _scale_strides(k_scale, H)
+    v_scale_strides = _scale_strides(v_scale, H)
     _packed_fa2_fwd_kernel[grid](
         q, k_packed, v_packed, k_scale, v_scale, step_ids, out,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k_packed.stride(0), k_packed.stride(1), k_packed.stride(2), k_packed.stride(3),
-        v_packed.stride(0), v_packed.stride(1), v_packed.stride(2), v_packed.stride(3),
-        k_scale.stride(0), k_scale.stride(2), k_scale.stride(1), k_scale.stride(3),
-        v_scale.stride(0), v_scale.stride(2), v_scale.stride(1), v_scale.stride(3),
-        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+        q.stride(0), q.stride(head_dim), q.stride(seq_dim), q.stride(-1),
+        k_packed.stride(0), k_packed.stride(head_dim), k_packed.stride(seq_dim), k_packed.stride(-1),
+        v_packed.stride(0), v_packed.stride(head_dim), v_packed.stride(seq_dim), v_packed.stride(-1),
+        *k_scale_strides,
+        *v_scale_strides,
+        out.stride(0), out.stride(head_dim), out.stride(seq_dim), out.stride(-1),
         H, M, N, sm_scale,
         BLOCK_M=block_m, BLOCK_N=block_n, D=D, BITS=bits,
     )
@@ -270,27 +292,33 @@ def _packed_attention(
 
 def _two_segment_attention(
     q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, bits,
-    block_m=64, block_n=32,
+    block_m=64, block_n=32, fmt="BHLc",
 ):
-    """q/fresh in BHLc, packed K/V in [B,H,Lcached,W]. Returns fp16 BHLc."""
+    """q/fresh in BHLc/BLHc, packed K/V in matching layout. Returns fp16 in q layout."""
     if bits != 8:
         raise NotImplementedError("Task 4 implements q8 two-segment attention only")
-    B, H, M, D = q.shape
-    N_cached = k_packed.shape[2]
-    N_fresh = k_fresh.shape[2]
+    head_dim, seq_dim = _layout_dims(fmt)
+    B = q.shape[0]
+    H = q.shape[head_dim]
+    M = q.shape[seq_dim]
+    D = q.shape[-1]
+    N_cached = k_packed.shape[seq_dim]
+    N_fresh = k_fresh.shape[seq_dim]
     out = torch.empty_like(q)
     sm_scale = 1.0 / math.sqrt(D)
     grid = (triton.cdiv(M, block_m), B * H)
+    k_scale_strides = _scale_strides(k_scale, H)
+    v_scale_strides = _scale_strides(v_scale, H)
     _two_segment_fa2_fwd_kernel[grid](
         q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, out,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k_packed.stride(0), k_packed.stride(1), k_packed.stride(2), k_packed.stride(3),
-        v_packed.stride(0), v_packed.stride(1), v_packed.stride(2), v_packed.stride(3),
-        k_scale.stride(0), k_scale.stride(2), k_scale.stride(1), k_scale.stride(3),
-        v_scale.stride(0), v_scale.stride(2), v_scale.stride(1), v_scale.stride(3),
-        k_fresh.stride(0), k_fresh.stride(1), k_fresh.stride(2), k_fresh.stride(3),
-        v_fresh.stride(0), v_fresh.stride(1), v_fresh.stride(2), v_fresh.stride(3),
-        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+        q.stride(0), q.stride(head_dim), q.stride(seq_dim), q.stride(-1),
+        k_packed.stride(0), k_packed.stride(head_dim), k_packed.stride(seq_dim), k_packed.stride(-1),
+        v_packed.stride(0), v_packed.stride(head_dim), v_packed.stride(seq_dim), v_packed.stride(-1),
+        *k_scale_strides,
+        *v_scale_strides,
+        k_fresh.stride(0), k_fresh.stride(head_dim), k_fresh.stride(seq_dim), k_fresh.stride(-1),
+        v_fresh.stride(0), v_fresh.stride(head_dim), v_fresh.stride(seq_dim), v_fresh.stride(-1),
+        out.stride(0), out.stride(head_dim), out.stride(seq_dim), out.stride(-1),
         H, M, N_cached, N_fresh, sm_scale,
         BLOCK_M=block_m, BLOCK_N=block_n, D=D, BITS=bits,
     )
