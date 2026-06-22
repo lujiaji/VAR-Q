@@ -24,7 +24,7 @@ def _fa2_fwd_kernel(
     offs_d = tl.arange(0, D)
     q_ptrs = (Q + b * stride_qb + h * stride_qh
               + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd)
-    q = tl.load(q_ptrs, mask=offs_m[:, None] < M, other=0.0).to(tl.float32)
+    q = tl.load(q_ptrs, mask=offs_m[:, None] < M, other=0.0)
 
     m_i = tl.full([BLOCK_M], -float("inf"), tl.float32)
     l_i = tl.zeros([BLOCK_M], tl.float32)
@@ -34,7 +34,7 @@ def _fa2_fwd_kernel(
         offs_n = start_n + tl.arange(0, BLOCK_N)
         k_ptrs = (K + b * stride_kb + h * stride_kh
                   + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kd)
-        k = tl.load(k_ptrs, mask=offs_n[:, None] < N, other=0.0).to(tl.float32)
+        k = tl.load(k_ptrs, mask=offs_n[:, None] < N, other=0.0)
         qk = tl.dot(q, tl.trans(k)) * sm_scale
         qk = tl.where(offs_n[None, :] < N, qk, -float("inf"))
 
@@ -46,7 +46,7 @@ def _fa2_fwd_kernel(
 
         v_ptrs = (V + b * stride_vb + h * stride_vh
                   + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vd)
-        v = tl.load(v_ptrs, mask=offs_n[:, None] < N, other=0.0).to(tl.float32)
+        v = tl.load(v_ptrs, mask=offs_n[:, None] < N, other=0.0)
         acc += tl.dot(p.to(v.dtype), v)
         m_i = m_new
 
@@ -61,24 +61,30 @@ def _dequant_tile(packed_ptr, scale_ptr, step_ids_ptr,
                   base_b, base_h, h, stride_pn, stride_pw,
                   scale_sb, scale_ss, scale_sh, scale_sd,
                   offs_n, N, D: tl.constexpr, BITS: tl.constexpr):
-    """Load a [BLOCK_N, D] fp32 tile from packed int32 + VARQ scale."""
-    VALS = 32 // BITS                       # q8 -> 4
+    """Load a [BLOCK_N, D] fp16 tile from packed int32 + VARQ scale."""
     offs_d = tl.arange(0, D)
-    word_col = offs_d // VALS               # [D]
-    slot = offs_d % VALS                    # [D]
+    offs_w = tl.arange(0, D // 4)
     p_ptrs = (packed_ptr + base_b + base_h
-              + offs_n[:, None] * stride_pn + word_col[None, :] * stride_pw)
-    words = tl.load(p_ptrs, mask=offs_n[:, None] < N, other=0)   # [BN,D] int32
-    mask_bits = (1 << BITS) - 1
-    sign_bit = 1 << (BITS - 1)
-    piece_u = (words >> (slot[None, :] * BITS)) & mask_bits
-    piece_s = tl.where((piece_u & sign_bit) != 0, piece_u - (1 << BITS), piece_u)
-    piece_s = piece_s.to(tl.float32)
+              + offs_n[:, None] * stride_pn + offs_w[None, :] * stride_pw)
+    words = tl.load(p_ptrs, mask=offs_n[:, None] < N, other=0)   # [BN,D/4] int32
+    mask_bits = 0xFF
+    sign_bit = 0x80
+    piece0_u = words & mask_bits
+    piece1_u = (words >> 8) & mask_bits
+    piece2_u = (words >> 16) & mask_bits
+    piece3_u = (words >> 24) & mask_bits
+    piece0_s = tl.where((piece0_u & sign_bit) != 0, piece0_u - 256, piece0_u)
+    piece1_s = tl.where((piece1_u & sign_bit) != 0, piece1_u - 256, piece1_u)
+    piece2_s = tl.where((piece2_u & sign_bit) != 0, piece2_u - 256, piece2_u)
+    piece3_s = tl.where((piece3_u & sign_bit) != 0, piece3_u - 256, piece3_u)
+    piece02 = tl.interleave(piece0_s, piece2_s)
+    piece13 = tl.interleave(piece1_s, piece3_s)
+    piece_s = tl.interleave(piece02, piece13).to(tl.float32)
     step = tl.load(step_ids_ptr + offs_n, mask=offs_n < N, other=0)   # [BN]
     s_ptrs = (scale_ptr + step[:, None] * scale_ss + h * scale_sh
               + offs_d[None, :] * scale_sd)
     scale = tl.load(s_ptrs, mask=offs_n[:, None] < N, other=0.0).to(tl.float32)
-    return piece_s * scale
+    return (piece_s * scale).to(tl.float16)
 
 
 @triton.jit
@@ -103,7 +109,7 @@ def _packed_fa2_fwd_kernel(
     offs_d = tl.arange(0, D)
     q_ptrs = (Q + b * stride_qb + h * stride_qh
               + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd)
-    q = tl.load(q_ptrs, mask=offs_m[:, None] < M, other=0.0).to(tl.float32)
+    q = tl.load(q_ptrs, mask=offs_m[:, None] < M, other=0.0)
 
     m_i = tl.full([BLOCK_M], -float("inf"), tl.float32)
     l_i = tl.zeros([BLOCK_M], tl.float32)
@@ -154,7 +160,7 @@ def _two_segment_fa2_fwd_kernel(
     stride_ob, stride_oh, stride_om, stride_od,
     H, M, N_cached, N_fresh, sm_scale,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-    D: tl.constexpr, BITS: tl.constexpr,
+    D: tl.constexpr, BITS: tl.constexpr, EVEN_N_FRESH: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_bh = tl.program_id(1)
@@ -165,7 +171,7 @@ def _two_segment_fa2_fwd_kernel(
     offs_d = tl.arange(0, D)
     q_ptrs = (Q + b * stride_qb + h * stride_qh
               + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd)
-    q = tl.load(q_ptrs, mask=offs_m[:, None] < M, other=0.0).to(tl.float32)
+    q = tl.load(q_ptrs, mask=offs_m[:, None] < M, other=0.0)
 
     m_i = tl.full([BLOCK_M], -float("inf"), tl.float32)
     l_i = tl.zeros([BLOCK_M], tl.float32)
@@ -201,9 +207,13 @@ def _two_segment_fa2_fwd_kernel(
         offs_n = start_n + tl.arange(0, BLOCK_N)
         k_ptrs = (KFresh + b * stride_kfb + h * stride_kfh
                   + offs_n[:, None] * stride_kfn + offs_d[None, :] * stride_kfd)
-        k = tl.load(k_ptrs, mask=offs_n[:, None] < N_fresh, other=0.0).to(tl.float32)
+        if EVEN_N_FRESH:
+            k = tl.load(k_ptrs)
+        else:
+            k = tl.load(k_ptrs, mask=offs_n[:, None] < N_fresh, other=0.0)
         qk = tl.dot(q, tl.trans(k)) * sm_scale
-        qk = tl.where(offs_n[None, :] < N_fresh, qk, -float("inf"))
+        if not EVEN_N_FRESH:
+            qk = tl.where(offs_n[None, :] < N_fresh, qk, -float("inf"))
 
         m_new = tl.maximum(m_i, tl.max(qk, 1))
         p = tl.exp(qk - m_new[:, None])
@@ -213,7 +223,10 @@ def _two_segment_fa2_fwd_kernel(
 
         v_ptrs = (VFresh + b * stride_vfb + h * stride_vfh
                   + offs_n[:, None] * stride_vfn + offs_d[None, :] * stride_vfd)
-        v = tl.load(v_ptrs, mask=offs_n[:, None] < N_fresh, other=0.0).to(tl.float32)
+        if EVEN_N_FRESH:
+            v = tl.load(v_ptrs)
+        else:
+            v = tl.load(v_ptrs, mask=offs_n[:, None] < N_fresh, other=0.0)
         acc += tl.dot(p.to(v.dtype), v)
         m_i = m_new
 
@@ -223,7 +236,7 @@ def _two_segment_fa2_fwd_kernel(
     tl.store(o_ptrs, acc.to(tl.float16), mask=offs_m[:, None] < M)
 
 
-def _plain_attention(q, k, v, block_m=64, block_n=64):
+def _plain_attention(q, k, v, block_m=128, block_n=32, num_warps=4, num_stages=2):
     """q,k,v in BHLc [B,H,L,D] fp16. Returns [B,H,Lq,D] fp16."""
     B, H, M, D = q.shape
     N = k.shape[2]
@@ -238,6 +251,7 @@ def _plain_attention(q, k, v, block_m=64, block_n=64):
         out.stride(0), out.stride(1), out.stride(2), out.stride(3),
         H, M, N, sm_scale,
         BLOCK_M=block_m, BLOCK_N=block_n, D=D,
+        num_warps=num_warps, num_stages=num_stages,
     )
     return out
 
@@ -260,7 +274,7 @@ def _scale_strides(scale, H):
 
 def _packed_attention(
     q, k_packed, v_packed, k_scale, v_scale, step_ids, bits,
-    block_m=64, block_n=32, fmt="BHLc",
+    block_m=64, block_n=32, num_warps=4, num_stages=3, fmt="BHLc",
 ):
     """q in BHLc/BLHc, packed K/V in matching layout. Returns fp16 in q layout."""
     if bits != 8:
@@ -286,13 +300,14 @@ def _packed_attention(
         out.stride(0), out.stride(head_dim), out.stride(seq_dim), out.stride(-1),
         H, M, N, sm_scale,
         BLOCK_M=block_m, BLOCK_N=block_n, D=D, BITS=bits,
+        num_warps=num_warps, num_stages=num_stages,
     )
     return out
 
 
 def _two_segment_attention(
     q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, bits,
-    block_m=64, block_n=32, fmt="BHLc",
+    block_m=128, block_n=32, num_warps=4, num_stages=2, fmt="BHLc",
 ):
     """q/fresh in BHLc/BLHc, packed K/V in matching layout. Returns fp16 in q layout."""
     if bits != 8:
@@ -321,6 +336,8 @@ def _two_segment_attention(
         out.stride(0), out.stride(head_dim), out.stride(seq_dim), out.stride(-1),
         H, M, N_cached, N_fresh, sm_scale,
         BLOCK_M=block_m, BLOCK_N=block_n, D=D, BITS=bits,
+        EVEN_N_FRESH=(N_fresh % block_n) == 0,
+        num_warps=num_warps, num_stages=num_stages,
     )
     return out
 
