@@ -162,3 +162,24 @@ CUTLASS/CuTe port (Phase B, conditional on PoC result).
   `flash_attn_func + dequant_all` (current production) and `Triton-plain + dequant`
   (framework-isolated), on A100, 1 card, synthetic tensors (no weights).
 - Gate the throughput claim on the measured numbers, not projections.
+
+## Measured fused result
+
+Run: `python scripts/bench/microbench_fused_vs_baseline.py` through
+`scripts/bench/remote_test.sh` on NVIDIA A100 80GB PCIe, torch
+`2.7.0a0+79aa17489c.nv25.04`, flash-attn available. Correctness gate: PASS.
+
+| pipeline | total_ms | speedup_vs_production |
+|----------|----------|-----------------------|
+| production | 7.448 | 1.000x |
+| fused | 153.202 | 0.049x |
+| plain-isolated | 59.680 | 0.125x |
+
+The projected ~1.6x throughput win was not met; the fused path is 20.6x slower
+than production. The production-vs-plain-isolated result shows the current
+Triton attention path is already about 8.0x slower than the production
+FlashAttention/CUTLASS path, far beyond the 15-20% Phase B threshold. The
+fused-vs-plain-isolated comparison is also negative (`153.202 ms` vs
+`59.680 ms`), so this Triton fused implementation does not yet isolate a
+positive dequant-fusion delta. Phase B is warranted if the fused path is still
+worth pursuing for throughput.
