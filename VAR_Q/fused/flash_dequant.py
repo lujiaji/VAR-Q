@@ -351,13 +351,23 @@ def _build_step_ids(group_lengths, device):
     return ids
 
 
+def _normalize_backend(backend):
+    normalized = str(backend).lower().replace("-", "_")
+    if normalized in ("triton", "cuda", "cuda_direct"):
+        return normalized
+    if normalized == "fused_cuda":
+        return "cuda"
+    raise ValueError(f"Unsupported fused attention backend: {backend}")
+
+
 def fused_dequant_attention(q, k_quant, v_quant, k_fresh, v_fresh,
-                            qkv_format="BHLc"):
+                            qkv_format="BHLc", backend="triton"):
     """Fused dequant + FA2 for one AR step.
 
     q, k_fresh, v_fresh: fp16 in qkv_format. k_quant/v_quant: VAR_Q with a
     packed VARQ cache. Returns attention output in qkv_format, fp16.
     """
+    backend = _normalize_backend(backend)
     bits = int(k_quant.quant_bits)
     k_packed = k_quant._valid_cached_item().contiguous()
     v_packed = v_quant._valid_cached_item().contiguous()
@@ -365,6 +375,15 @@ def fused_dequant_attention(q, k_quant, v_quant, k_fresh, v_fresh,
     v_scale = v_quant._valid_cached_scale().contiguous().to(torch.float16)
     group_lengths = list(k_quant._scale_L_counts)
     step_ids = _build_step_ids(group_lengths, q.device)
+    if backend in ("cuda", "cuda_direct"):
+        if qkv_format != "BHLc":
+            raise NotImplementedError("CUDA Track B backend currently supports BHLc only")
+        from .flash_dequant_cuda import fused_flash_dequant_attention
+
+        return fused_flash_dequant_attention(
+            q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh,
+            direct=backend == "cuda_direct",
+        )
     return _two_segment_attention(
         q, k_packed, v_packed, k_scale, v_scale, step_ids,
         k_fresh, v_fresh, bits, fmt=qkv_format,

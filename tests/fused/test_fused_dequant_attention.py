@@ -13,6 +13,20 @@ def test_import_exists():
     assert callable(fused_dequant_attention)
 
 
+def test_invalid_backend_rejected():
+    from VAR_Q.fused import fused_dequant_attention
+    with pytest.raises(ValueError, match="Unsupported fused attention backend"):
+        fused_dequant_attention(None, None, None, None, None, backend="bogus")
+
+
+def test_backend_aliases():
+    from VAR_Q.fused.flash_dequant import _normalize_backend
+    assert _normalize_backend("triton") == "triton"
+    assert _normalize_backend("cuda") == "cuda"
+    assert _normalize_backend("cuda-direct") == "cuda_direct"
+    assert _normalize_backend("fused_cuda") == "cuda"
+
+
 def test_oracle_shapes_cpu():
     B, H, D = 1, 2, 128
     fmt = "BHLc"

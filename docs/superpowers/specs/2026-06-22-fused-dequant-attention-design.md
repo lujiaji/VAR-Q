@@ -183,3 +183,30 @@ fused-vs-plain-isolated comparison is also negative (`153.202 ms` vs
 `59.680 ms`), so this Triton fused implementation does not yet isolate a
 positive dequant-fusion delta. Phase B is warranted if the fused path is still
 worth pursuing for throughput.
+
+## Measured fused result — Phase B CUDA (flash-attn v2.7.3 fork, sm80)
+
+Build: `scripts/bench/build_fused_flash.sh` — clones flash-attn v2.7.3 + cutlass,
+compiles `_varq_fused_flash.so` (sm80 / fp16 / head_dim=128). **Build succeeds.**
+Run: `microbench_fused_vs_baseline.py --fused-backend {cuda,cuda-direct}` via
+`remote_test.sh` on A100 80GB, torch `2.7.0a0+...nv25.04`. Correctness: **PASS**
+for both backends. Heaviest step `q=4096 cached=6425 fresh=4096 H=32 D=128`.
+
+| pipeline | total_ms | speedup_vs_production |
+|----------|----------|-----------------------|
+| production (dequant_all → flash) | 9.67 | 1.000x |
+| fp16-fa-only (ceiling, no dequant) | 5.99 | **1.616x** |
+| fused-cuda (dense bridge) | 9.30 | 1.040x |
+| fused-cuda-direct (dequant-on-load) | 10.20 | 0.950x |
+| plain-isolated (Triton) | 14.1 | 0.686x |
+
+The CUDA fork is **numerically correct** but **not yet faster**: the dense
+bridge still materializes full fp16 K/V before flash (≈ production, +4%), and the
+direct dequant-on-load path uses scalar (unvectorized) q8/fresh loads in the tile
+loop, landing below production. The ~1.61x ceiling (`fp16-fa-only`) is the prize
+and is only reachable via the direct path. **Next: vectorize the direct loader's
+K/V gmem→smem load + reuse per-(step,head,channel) scale across the tile**, then
+re-bench. End-to-end Infinity-8B run is deferred: it needs ~23GB+ of weights and
+the shared A100 box currently has only ~17GB free per GPU (vLLM TP serving job
+holds 64GB on all 8 GPUs), and the kernel isn't yet fast enough to show an e2e
+delta regardless.

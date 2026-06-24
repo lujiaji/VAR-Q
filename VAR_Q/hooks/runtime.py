@@ -583,6 +583,7 @@ def _wrap_infinity_forward(handle: HookHandle, module: nn.Module) -> None:
             oup = fused_dequant_attention(
                 q, self.k_quant, self.v_quant, k_fresh=k, v_fresh=v,
                 qkv_format=self.k_quant.qkv_format,
+                backend=getattr(self, "fused_kv_backend", "triton"),
             )
             if self.k_quant.qkv_format == "BHLc":
                 oup = oup.transpose(1, 2).reshape(B, L, C)
@@ -855,6 +856,7 @@ def _configure_attention(
         "empty_cache_policy": str(cfg.get("empty_cache_policy", "after_generation")),
         "empty_cache_threshold_bytes": int(cfg.get("empty_cache_threshold_bytes", 0) or 0),
         "enable_fused_kv_flashattn": bool(cfg.get("enable_fused_kv_flashattn", False)),
+        "fused_kv_backend": str(cfg.get("fused_kv_backend", "triton")),
         "debug_memory": bool(cfg.get("debug_memory", cfg.get("profile_memory", False))),
         "dequant_dtype": str(cfg.get("dequant_dtype", "native")),
         "quant_compute_dtype": str(cfg.get("quant_compute_dtype", "native")),

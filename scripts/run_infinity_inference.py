@@ -27,23 +27,23 @@ from VAR_Q.profiling import (
 def _load_infinity_runtime():
     infinity_root = str(require_third_party_repo("Infinity", "https://github.com/FoundationVision/Infinity"))
     prepend_sys_path([REPO_ROOT, infinity_root])
-    from tools.run_infinity import (
-        _import_dynamic_resolution,
-        add_common_arguments,
-        gen_one_img,
-        load_tokenizer,
-        load_transformer,
-        load_visual_tokenizer,
-    )
+    from tools import run_infinity
+
+    import_dynamic_resolution = getattr(run_infinity, "_import_dynamic_resolution", None)
+    if import_dynamic_resolution is None:
+        def import_dynamic_resolution():
+            from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
+
+            return dynamic_resolution_h_w, h_div_w_templates
 
     return (
         infinity_root,
-        add_common_arguments,
-        gen_one_img,
-        load_tokenizer,
-        load_transformer,
-        load_visual_tokenizer,
-        _import_dynamic_resolution,
+        run_infinity.add_common_arguments,
+        run_infinity.gen_one_img,
+        run_infinity.load_tokenizer,
+        run_infinity.load_transformer,
+        run_infinity.load_visual_tokenizer,
+        import_dynamic_resolution,
     )
 
 

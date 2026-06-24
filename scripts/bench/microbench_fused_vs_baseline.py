@@ -41,9 +41,12 @@ class BenchState(NamedTuple):
     q: torch.Tensor
     kq: VAR_Q
     vq: VAR_Q
+    full_k: torch.Tensor
+    full_v: torch.Tensor
     fk: torch.Tensor
     fv: torch.Tensor
     flash_attn_func: Callable[..., torch.Tensor]
+    fused_backend: str
 
 
 def make_quantizer(kv_role: str) -> VAR_Q:
@@ -116,6 +119,17 @@ def production_pipeline(state: BenchState) -> torch.Tensor:
     return blhc_to_bhlc(out)
 
 
+def fp16_fa_only_pipeline(state: BenchState) -> torch.Tensor:
+    out = state.flash_attn_func(
+        bhlc_to_blhc(state.q),
+        bhlc_to_blhc(state.full_k),
+        bhlc_to_blhc(state.full_v),
+        dropout_p=0.0,
+        causal=False,
+    )
+    return blhc_to_bhlc(out)
+
+
 def fused_pipeline(state: BenchState) -> torch.Tensor:
     return fused_dequant_attention(
         state.q,
@@ -124,6 +138,7 @@ def fused_pipeline(state: BenchState) -> torch.Tensor:
         state.fk,
         state.fv,
         qkv_format=QKV_FORMAT,
+        backend=state.fused_backend,
     )
 
 
@@ -141,11 +156,13 @@ def max_abs_diff(a: torch.Tensor, b: torch.Tensor) -> float:
 
 def correctness_gate(state: BenchState) -> bool:
     production = production_pipeline(state)
+    fp16_fa_only = fp16_fa_only_pipeline(state)
     fused = fused_pipeline(state)
     plain = plain_isolated_pipeline(state)
     torch.cuda.synchronize(state.q.device)
 
     comparisons = (
+        ("production", "fp16-fa-only", production, fp16_fa_only),
         ("production", "fused", production, fused),
         ("production", "plain-isolated", production, plain),
         ("fused", "plain-isolated", fused, plain),
@@ -162,10 +179,11 @@ def correctness_gate(state: BenchState) -> bool:
     return ok
 
 
-def print_env(device: torch.device, flash_available: bool) -> None:
+def print_env(device: torch.device, flash_available: bool, fused_backend: str) -> None:
     print(f"torch: {torch.__version__}")
     print(f"device: {torch.cuda.get_device_name(device)}")
     print(f"flash_attn available: {'y' if flash_available else 'n'}")
+    print(f"fused_backend: {fused_backend}")
     print(f"qkv_format: {QKV_FORMAT}")
     print(
         f"B={BATCH} H={HEADS} D={HEAD_DIM} dtype=fp16 "
@@ -211,11 +229,21 @@ def run(args: argparse.Namespace) -> int:
     torch.cuda.set_device(device)
 
     flash_available, flash_attn_func = detect_flash_attn()
-    print_env(device, flash_available)
+    print_env(device, flash_available, args.fused_backend)
     print(f"iters: {args.iters} warmup: {args.warmup}")
     if flash_attn_func is None:
         print("error: flash_attn_func is required for the production baseline", file=sys.stderr)
         return 1
+    if args.fused_backend in ("cuda", "cuda-direct"):
+        from VAR_Q.fused import flash_dequant_cuda
+
+        status = flash_dequant_cuda.availability()
+        print(f"fused_cuda_available: {'y' if status.available else 'n'}")
+        print(f"fused_cuda_message: {status.message}")
+        if status.module_path:
+            print(f"fused_cuda_module_path: {status.module_path}")
+        if not status.available:
+            return 1
 
     with torch.inference_mode():
         kq, vq, ref_k, ref_v = build_q8_cache(device)
@@ -224,13 +252,19 @@ def run(args: argparse.Namespace) -> int:
         if ref_v.shape != (BATCH, HEADS, CACHE_TOKENS, HEAD_DIM):
             raise RuntimeError(f"unexpected V cache shape: {tuple(ref_v.shape)}")
 
+        q = randn_bhlc(FRESH_TOKENS, device)
+        fk = randn_bhlc(FRESH_TOKENS, device)
+        fv = randn_bhlc(FRESH_TOKENS, device)
         state = BenchState(
-            q=randn_bhlc(FRESH_TOKENS, device),
+            q=q,
             kq=kq,
             vq=vq,
-            fk=randn_bhlc(FRESH_TOKENS, device),
-            fv=randn_bhlc(FRESH_TOKENS, device),
+            full_k=torch.cat([ref_k, fk], dim=2).contiguous(),
+            full_v=torch.cat([ref_v, fv], dim=2).contiguous(),
+            fk=fk,
+            fv=fv,
             flash_attn_func=flash_attn_func,
+            fused_backend=args.fused_backend,
         )
 
         if not correctness_gate(state):
@@ -239,12 +273,14 @@ def run(args: argparse.Namespace) -> int:
 
         timer = lambda fn: median_ms_cuda_event(fn, args.iters, args.warmup, device)
         production_ms = timer(lambda: production_pipeline(state))
+        fp16_fa_only_ms = timer(lambda: fp16_fa_only_pipeline(state))
         fused_ms = timer(lambda: fused_pipeline(state))
         plain_ms = timer(lambda: plain_isolated_pipeline(state))
 
     rows = [
         ("production", production_ms, 1.0),
-        ("fused", fused_ms, production_ms / fused_ms),
+        ("fp16-fa-only", fp16_fa_only_ms, production_ms / fp16_fa_only_ms),
+        (f"fused-{args.fused_backend}", fused_ms, production_ms / fused_ms),
         ("plain-isolated", plain_ms, production_ms / plain_ms),
     ]
     print_table(rows)
@@ -258,6 +294,12 @@ def main() -> int:
     parser.add_argument("--iters", type=int, default=50, help="timed iterations")
     parser.add_argument("--warmup", type=int, default=10, help="warmup iterations")
     parser.add_argument("--device", default="cuda", help="torch CUDA device")
+    parser.add_argument(
+        "--fused-backend",
+        choices=("triton", "cuda", "cuda-direct"),
+        default="triton",
+        help="fused attention backend under test",
+    )
     args = parser.parse_args()
 
     if args.iters <= 0:
