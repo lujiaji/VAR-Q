@@ -342,3 +342,37 @@ e2e: if dequant is hidden, varq8_fused → fp16 + (small) quant-on-write ≈ rec
 most of the 1.27 s penalty (6.8 → ~5.7-5.9 s). smem budget is fine (sK/sV
 8KB→16KB each, +16KB, well under 163KB). This is the high-value next step;
 quant-on-write is too small to bother with.
+
+## Final findings (2026-06-24, late) — measurement is the real blocker
+
+After many runs across "idle" and busy GPUs, the unavoidable conclusion is that
+**the .101 box is too volatile to measure absolute kernel timings** — even a
+`util<5 && mem<3GB` "truly idle" gate produced production 7.8 / ceiling 3.83 /
+dequant 2.49 ms one run vs 9.67 / 6.04 / 1.77 ms another. 2-3x swings. Only
+tightly-controlled back-to-back same-GPU A/B (seconds apart) is trustworthy.
+
+What survives that bar:
+
+1. **cp.async direct is correct and the best fused variant** (e2e: direct < non-
+   fused < dense, consistent). On a *less-loaded* GPU it runs **1.37x faster than
+   production** (5.79 vs 7.84 ms) — i.e. contention had been masking the direct
+   path's advantage; the earlier "0.9x" reads were all from saturated GPUs. It
+   still does not reach the fp16 ceiling. cp.async's edge over sync direct is
+   contention-dependent (~10% busy, ~0% idle). **Committed + merged.**
+
+2. **Autotuning the Triton dequant kernel is a no-op.** Added `@triton.autotune`
+   over BLOCK_ROWS/WORDS/warps/stages (branch `perf/triton-dequant`, commit
+   5bb0c18). Correctness: bit-exact (smoke test, maxdiff=0 across BHLc/BLHc ×
+   bits{2,4,8}). Timing back-to-back same GPU: **NEW 2.278 ms vs OLD 2.227 ms —
+   identical.** The dequant is NOT tile-config-bound; the cost is elsewhere
+   (likely the per-element scale gather, or the per-row integer division
+   `row//(H*L)` for the b/h/l decode). **Not merged** (zero benefit + adds
+   first-call tuning cost). To actually speed up dequant: hoist the scale load
+   out of the per-element path and/or avoid the integer divides — uncertain
+   payoff, and unmeasurable on this box anyway.
+
+**Bottom line for the kernel work:** cp.async direct (merged) is the shippable
+result — correct, best-of-three, faster than production on an unloaded GPU. The
+two remaining levers (scheme C double-buffer; a hand-tuned dequant kernel) both
+need a *dedicated/idle* GPU to develop and validate against — which this shared
+box cannot currently provide. That's the gating constraint, not ideas.
