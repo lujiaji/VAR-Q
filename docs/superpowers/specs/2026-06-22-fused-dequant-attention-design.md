@@ -249,3 +249,96 @@ post-rope fp32 q/k/v to bf16 in the wrapper, varq8_fused runs end-to-end.)
    `x has unexpected dtype` on the bf16 model; the fp16 microbench never exposed
    it. Fixed by templatizing the dense bridge on output dtype + casting post-rope
    fp32 q/k/v to bf16 in the wrapper. `fwd_direct` stays fp16-only for now.
+
+## cp.async direct path — implemented + benched (2026-06-24, A100 .101)
+
+Implemented "scheme A" for the direct path (`feat/direct-cpasync`, merged): the
+cached-uniform K/V tiles now **stage packed int32 into a scratch smem region via
+`cp.async.cg.shared.global`**, then dequant from smem after `cp_async_wait<0>()`
+— restoring gmem-latency overlap with MMA that the synchronous register-dequant
+had lost. New `VarqPackedTileSmem` budget (blockN=32 → +4KB, total ~53KB, well
+under sm80's 163KB). Builds clean, **correctness PASS**.
+
+**The .101 box is heavily shared (all 8 GPUs 75-100% busy, held by other jobs),
+so microbench numbers are unreliable** — the `fp16-fa-only` ceiling alone swings
+3.86–6.04 ms (1.6× spread) across back-to-back runs. A/B (sync .so vs cp.async
+.so, same GPU, back-to-back), 8 measurements:
+
+| measurement | sync direct | cp.async direct | ceiling (noisy) |
+|-------------|-------------|-----------------|-----------------|
+| run0 | 10.67 (0.90x) | **5.96 (1.61x)** | 3.94 / 5.99 |
+| round1 | 10.66 (0.91x) | 10.02 (0.97x) | 6.04 |
+| round2 | 10.69 (0.75x) | 10.65 (0.91x) | 3.94 |
+| round3 | 10.67 (0.91x) | 10.67 (0.81x) | 6.03 |
+
+**7 of 8 measurements put the direct path at ~10.6 ms (≈0.9x, below production);
+the single 5.96 ms (1.61x, hitting ceiling) is an outlier that did not
+reproduce.** The cleanest pair (ceiling **stable** at 6.04 ms / 1.60x in both
+halves, production stable 9.67 ms):
+
+| .so | direct ms | vs production | vs ceiling (6.04) |
+|-----|-----------|---------------|-------------------|
+| sync     | 10.68 | 0.906x | +77% |
+| cp.async |  9.68 | **0.999x** | +60% |
+
+**Settled read: cp.async direct reaches production parity (1.0x), ~10% faster
+than the sync direct path, but does NOT reach the 1.60x fp16 ceiling.** Why:
+cp.async hides the packed gmem *read* latency (that's the ~10%), but the dequant
+ALU + writing fp16 into sK/sV still runs serially after `cp_async_wait`, ahead of
+the MMA. Hiding *that* needs double-buffered dequant-ahead (scheme C) — a much
+harder rewrite, fragile under the textual-patch build. The lone 5.96 ms reading
+was contention noise, not a real ceiling hit.
+
+This is consistent with e2e (below): a ~10% attention-path gain → recovering
+~12-19% of the e2e quant penalty. The fused kernel only touches the *dequant-for-
+attention* slice; the *quant-on-write* (int8 quantize + int32 pack + scale calc,
+incurred on both fused and non-fused paths) is the larger remaining e2e penalty
+and is untouched by this kernel.
+
+## e2e with cuda-direct — Infinity-8B (.101, 2026-06-24, two runs)
+
+`bench_infinity_e2e.py --fused-backend cuda-direct`, 1024px, pn=1M. Box heavily
+shared (picked GPUs still hit 80-96% util from other jobs), so absolute s/img is
+inflated ~1.6x vs the earlier clean 3.35s fp16 — **only within-invocation
+relative comparison is trustworthy.** Cleaner run (5 iters, all back-to-back in
+one invocation):
+
+| case | s/img (mean) | vs fp16 |
+|------|--------------|---------|
+| fp16 | 5.54 | 1.00x |
+| varq8 (non-fused) | 6.81 | 1.229x |
+| **varq8_fused (cuda-direct)** | **6.65** | **1.202x** |
+| varq8_fused (cuda dense, separate run) | 6.97 | 1.258x |
+
+**Ordering among quant variants: direct (6.65) < non-fused (6.81) < dense (6.97)
+— cp.async direct is the fastest fused variant, beating both, consistently
+across both e2e runs.** But the magnitude is small:
+
+- Fusion saves `varq8 − direct = 6.81 − 6.65 = 0.15 s` — only **~12% of the 1.27 s
+  quant penalty** (the earlier contended run showed ~19%).
+- The remaining **~88% (~1.12 s) is quant-on-write + cache/pack/scale**, which the
+  attention-dequant fusion cannot touch.
+
+**Decomposition (idle-ish GPU, single big call, cuda events):**
+
+| op | ms |
+|----|----|
+| quant-on-write (int8 quantize + scale, fresh=4096 only) | 0.41 |
+| dequant_all (read path, whole cache=6425) | 1.77 |
+
+**dequant (read) is ~4x quant-on-write — and it grows with cache length (every
+step dequantizes the whole growing cache) while quant-on-write stays per-step
+small.** So the e2e quant penalty is dominated by *dequant*, not quant-on-write.
+(An earlier note in this doc misattributed ~88% to quant-on-write — wrong; see
+this decomposition.)
+
+**Corrected gatekeeping conclusion:** the cp.async direct path only reaches
+*parity with separate-dequant* (microbench 9.68 ≈ production 9.67) — it does NOT
+hide the dequant, which is why e2e barely moved. The real lever is **scheme C:
+double-buffered dequant-ahead** — dequant tile N+1 into a 2nd sK/sV buffer during
+tile N's MMA. Since dequant (~3.6 ms) < MMA (~6 ms) per big call, it can be fully
+hidden, taking fused-attention from 9.68 → ~6.04 (the 1.60x ceiling). Projected
+e2e: if dequant is hidden, varq8_fused → fp16 + (small) quant-on-write ≈ recover
+most of the 1.27 s penalty (6.8 → ~5.7-5.9 s). smem budget is fine (sK/sV
+8KB→16KB each, +16KB, well under 163KB). This is the high-value next step;
+quant-on-write is too small to bother with.
