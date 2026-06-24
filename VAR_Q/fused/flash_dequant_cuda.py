@@ -109,7 +109,8 @@ def fused_flash_dequant_attention(
     """Call the CUDA fused FlashAttention backend.
 
     Shapes for v1:
-    - q, k_fresh, v_fresh: BHLc fp16 tensors with head_dim=128
+    - q, k_fresh, v_fresh: BHLc fp16/bf16 tensors with head_dim=128 for
+      dense bridge; cuda-direct remains fp16-only
     - k_packed, v_packed: BHLw int32 q8-packed cached tensors
     - k_scale, v_scale: BHSd fp16 compact VARQ scales
     - step_ids: int32 cached-token to scale-id map
@@ -119,6 +120,19 @@ def fused_flash_dequant_attention(
     entrypoint = "fwd_direct" if direct else "fwd"
     if not hasattr(ext, entrypoint):
         raise RuntimeError(f"{EXTENSION_NAME} is loaded but does not expose {entrypoint}()")
-    return getattr(ext, entrypoint)(
+    # The CUDA kernel accepts fp16 (both paths) or bf16 (dense bridge only).
+    # Infinity runs bf16 autocast but q/k/v can arrive as fp32 (e.g. after rope),
+    # so cast unsupported dtypes to the kernel's compute dtype and restore on output.
+    orig_dtype = q.dtype
+    supported = (torch.float16,) if direct else (torch.float16, torch.bfloat16)
+    if orig_dtype not in supported:
+        target = torch.float16 if direct else torch.bfloat16
+        q = q.to(target)
+        k_fresh = k_fresh.to(target)
+        v_fresh = v_fresh.to(target)
+    out = getattr(ext, entrypoint)(
         q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh
     )
+    if out.dtype != orig_dtype:
+        out = out.to(orig_dtype)
+    return out

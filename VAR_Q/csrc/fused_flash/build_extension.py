@@ -99,6 +99,7 @@ def build_extension(flash_attn_src: Path, build_dir: Path, verbose: bool) -> obj
         src_dir / "varq_fused_flash_cuda.cu",
         src_dir / "varq_flash_fwd_hdim128_fp16_sm80.cu",
         flash_attn_src / "csrc" / "flash_attn" / "src" / "flash_fwd_hdim128_fp16_sm80.cu",
+        flash_attn_src / "csrc" / "flash_attn" / "src" / "flash_fwd_hdim128_bf16_sm80.cu",
     ]
     include_paths = [
         generated_dir,

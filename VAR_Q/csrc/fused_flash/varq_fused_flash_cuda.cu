@@ -2,7 +2,9 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/util/BFloat16.h>
 #include <c10/util/Exception.h>
+#include <c10/util/Half.h>
 
 #include <cmath>
 #include <sstream>
@@ -27,12 +29,19 @@ void check_rank4(const at::Tensor &x, const char *name) {
     TORCH_CHECK(x.dim() == 4, name, " must be rank-4");
 }
 
-void check_bhlc_fp16_128(const at::Tensor &x, const char *name) {
+void check_bhlc_128(const at::Tensor &x, const char *name, bool allow_bf16) {
     CHECK_CUDA(x);
     check_rank4(x, name);
-    CHECK_DTYPE(x, at::kHalf);
+    TORCH_CHECK(
+        x.scalar_type() == at::kHalf || (allow_bf16 && x.scalar_type() == at::kBFloat16),
+        name,
+        " has unexpected dtype");
     CHECK_CONTIGUOUS_LAST(x);
     TORCH_CHECK(x.size(3) == kHeadDim, name, " must have head_dim=128");
+}
+
+void check_same_dtype(const at::Tensor &lhs, const at::Tensor &rhs, const char *rhs_name) {
+    TORCH_CHECK(rhs.scalar_type() == lhs.scalar_type(), rhs_name, " dtype must match q dtype");
 }
 
 void check_same_bhlc_shape(const at::Tensor &lhs, const at::Tensor &rhs, const char *rhs_name) {
@@ -49,11 +58,12 @@ int round_multiple(int x, int m) {
     return ((x + m - 1) / m) * m;
 }
 
+template <typename OutT>
 __global__ void dequant_q8_to_blhc_kernel(
     const int32_t *__restrict__ packed,
     const at::Half *__restrict__ scale,
     const int32_t *__restrict__ step_ids,
-    at::Half *__restrict__ dense,
+    OutT *__restrict__ dense,
     int B,
     int H,
     int N,
@@ -79,13 +89,14 @@ __global__ void dequant_q8_to_blhc_kernel(
         const int step = step_ids[n];
         const float scale_value = static_cast<float>(scale[(((b * H + h) * S + step) * kHeadDim) + d]);
         dense[(((b * N_total + (dst_offset + n)) * H + h) * kHeadDim) + d] =
-            static_cast<at::Half>(static_cast<float>(signed_piece) * scale_value);
+            static_cast<OutT>(static_cast<float>(signed_piece) * scale_value);
     }
 }
 
+template <typename OutT>
 __global__ void copy_bhlc_to_blhc_kernel(
-    const at::Half *__restrict__ src,
-    at::Half *__restrict__ dst,
+    const OutT *__restrict__ src,
+    OutT *__restrict__ dst,
     int B,
     int H,
     int N,
@@ -106,6 +117,7 @@ __global__ void copy_bhlc_to_blhc_kernel(
     }
 }
 
+template <typename OutT>
 void launch_dequant_q8_to_blhc(
     const at::Tensor &packed,
     const at::Tensor &scale,
@@ -121,11 +133,11 @@ void launch_dequant_q8_to_blhc(
     const int threads = 256;
     const int64_t total = static_cast<int64_t>(B) * H * N * kHeadDim;
     const int blocks = static_cast<int>((total + threads - 1) / threads);
-    dequant_q8_to_blhc_kernel<<<blocks, threads, 0, stream>>>(
+    dequant_q8_to_blhc_kernel<OutT><<<blocks, threads, 0, stream>>>(
         packed.data_ptr<int32_t>(),
         scale.data_ptr<at::Half>(),
         step_ids.data_ptr<int32_t>(),
-        dense.data_ptr<at::Half>(),
+        dense.data_ptr<OutT>(),
         B,
         H,
         N,
@@ -135,6 +147,7 @@ void launch_dequant_q8_to_blhc(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template <typename OutT>
 void launch_copy_bhlc_to_blhc(
     const at::Tensor &src,
     at::Tensor &dst,
@@ -147,9 +160,9 @@ void launch_copy_bhlc_to_blhc(
     const int threads = 256;
     const int64_t total = static_cast<int64_t>(B) * H * N * kHeadDim;
     const int blocks = static_cast<int>((total + threads - 1) / threads);
-    copy_bhlc_to_blhc_kernel<<<blocks, threads, 0, stream>>>(
-        src.data_ptr<at::Half>(),
-        dst.data_ptr<at::Half>(),
+    copy_bhlc_to_blhc_kernel<OutT><<<blocks, threads, 0, stream>>>(
+        src.data_ptr<OutT>(),
+        dst.data_ptr<OutT>(),
         B,
         H,
         N,
@@ -210,7 +223,7 @@ void set_dense_fwd_params(
     params.window_size_left = -1;
     params.window_size_right = -1;
     params.is_seqlens_k_cumulative = true;
-    params.is_bf16 = false;
+    params.is_bf16 = q_blhc.scalar_type() == at::kBFloat16;
     params.is_causal = false;
 }
 
@@ -298,10 +311,13 @@ void validate_inputs(
     const at::Tensor &v_scale,
     const at::Tensor &step_ids,
     const at::Tensor &k_fresh,
-    const at::Tensor &v_fresh) {
-    check_bhlc_fp16_128(q, "q");
-    check_bhlc_fp16_128(k_fresh, "k_fresh");
-    check_bhlc_fp16_128(v_fresh, "v_fresh");
+    const at::Tensor &v_fresh,
+    bool allow_bf16) {
+    check_bhlc_128(q, "q", allow_bf16);
+    check_bhlc_128(k_fresh, "k_fresh", allow_bf16);
+    check_bhlc_128(v_fresh, "v_fresh", allow_bf16);
+    check_same_dtype(q, k_fresh, "k_fresh");
+    check_same_dtype(q, v_fresh, "v_fresh");
     check_same_bhlc_shape(q, k_fresh, "k_fresh");
     check_same_bhlc_shape(q, v_fresh, "v_fresh");
 
@@ -346,7 +362,7 @@ std::string backend_info() {
     std::ostringstream oss;
     oss << "VAR-Q Track B fused FlashAttention CUDA bridge"
         << "; target=sm80"
-        << "; dtype=fp16"
+        << "; dtype=fp16/bf16"
         << "; head_dim=128"
         << "; status=dense-bridge"
         << "; direct=experimental";
@@ -363,7 +379,7 @@ at::Tensor fwd(
     at::Tensor k_fresh,
     at::Tensor v_fresh) {
     const at::cuda::CUDAGuard device_guard(q.device());
-    validate_inputs(q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh);
+    validate_inputs(q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, /*allow_bf16=*/true);
 
     const int B = q.size(0);
     const int H = q.size(1);
@@ -380,14 +396,25 @@ at::Tensor fwd(
     at::Tensor softmax_lse = at::empty({B, H, seqlen_q}, opts.dtype(at::kFloat));
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
-    launch_dequant_q8_to_blhc(k_packed, k_scale, step_ids, k_dense, 0, stream);
-    launch_dequant_q8_to_blhc(v_packed, v_scale, step_ids, v_dense, 0, stream);
-    launch_copy_bhlc_to_blhc(k_fresh, k_dense, seqlen_cached, stream);
-    launch_copy_bhlc_to_blhc(v_fresh, v_dense, seqlen_cached, stream);
+    if (q.scalar_type() == at::kHalf) {
+        launch_dequant_q8_to_blhc<at::Half>(k_packed, k_scale, step_ids, k_dense, 0, stream);
+        launch_dequant_q8_to_blhc<at::Half>(v_packed, v_scale, step_ids, v_dense, 0, stream);
+        launch_copy_bhlc_to_blhc<at::Half>(k_fresh, k_dense, seqlen_cached, stream);
+        launch_copy_bhlc_to_blhc<at::Half>(v_fresh, v_dense, seqlen_cached, stream);
+    } else {
+        launch_dequant_q8_to_blhc<at::BFloat16>(k_packed, k_scale, step_ids, k_dense, 0, stream);
+        launch_dequant_q8_to_blhc<at::BFloat16>(v_packed, v_scale, step_ids, v_dense, 0, stream);
+        launch_copy_bhlc_to_blhc<at::BFloat16>(k_fresh, k_dense, seqlen_cached, stream);
+        launch_copy_bhlc_to_blhc<at::BFloat16>(v_fresh, v_dense, seqlen_cached, stream);
+    }
 
     Flash_fwd_params params;
     set_dense_fwd_params(params, q_blhc, k_dense, v_dense, out_blhc, softmax_lse);
-    run_mha_fwd_<cutlass::half_t, kHeadDim, false>(params, stream);
+    if (q.scalar_type() == at::kHalf) {
+        run_mha_fwd_<cutlass::half_t, kHeadDim, false>(params, stream);
+    } else {
+        run_mha_fwd_<cutlass::bfloat16_t, kHeadDim, false>(params, stream);
+    }
     return out_blhc.transpose(1, 2).contiguous();
 }
 
@@ -401,7 +428,7 @@ at::Tensor fwd_direct(
     at::Tensor k_fresh,
     at::Tensor v_fresh) {
     const at::cuda::CUDAGuard device_guard(q.device());
-    validate_inputs(q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh);
+    validate_inputs(q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, /*allow_bf16=*/false);
 
     const int B = q.size(0);
     const int H = q.size(1);
