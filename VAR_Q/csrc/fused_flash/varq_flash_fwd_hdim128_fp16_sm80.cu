@@ -36,7 +36,9 @@ __global__ void varq_flash_fwd_kernel(KERNEL_PARAM_MODIFIER const Varq_fwd_param
 
 template<typename Kernel_traits>
 void run_varq_flash_fwd(Varq_fwd_params &params, cudaStream_t stream) {
-    constexpr size_t smem_size = Kernel_traits::kSmemSize;
+    constexpr size_t smem_size =
+        Kernel_traits::kSmemSize + flash::VarqPackedTileSmem<Kernel_traits>::kBytes;
+    static_assert(smem_size <= 163 * 1024, "VAR-Q fused flash smem exceeds sm80 dynamic shared memory limit");
     params.varq_block_n = Kernel_traits::kBlockN;
     const int num_m_block = (params.seqlen_q + Kernel_traits::kBlockM - 1) / Kernel_traits::kBlockM;
     dim3 grid(num_m_block, params.b, params.h);

@@ -26,12 +26,13 @@ K_COPY_PATTERNS = (
                                        binfo.actual_seqlen_k - n_block * kBlockN);""",
         """flash::varq_copy_k_tile<Is_even_MN, Is_even_K>(
         gmem_tiled_copy_QKV, tKgK(_, _, _, n_block), params, tKsK, tKVcKV, tKVpKV, bidb, bidh, n_block,
-        binfo.actual_seqlen_k - n_block * kBlockN);""",
+        varq_packed_smem, binfo.actual_seqlen_k - n_block * kBlockN);""",
     ),
     (
         """flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK(_, _, _, n_block - 1), tKsK, tKVcKV, tKVpKV);""",
         """flash::varq_copy_k_tile</*Is_even_MN=*/true, Is_even_K>(
-            gmem_tiled_copy_QKV, tKgK(_, _, _, n_block - 1), params, tKsK, tKVcKV, tKVpKV, bidb, bidh, n_block - 1, 0);""",
+            gmem_tiled_copy_QKV, tKgK(_, _, _, n_block - 1), params, tKsK, tKVcKV, tKVpKV, bidb, bidh, n_block - 1,
+            varq_packed_smem, 0);""",
     ),
 )
 
@@ -39,7 +40,8 @@ V_COPY_PATTERNS = (
     (
         """flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV(_, _, _, n_block), tVsV, tKVcKV, tKVpKV);""",
         """flash::varq_copy_v_tile</*Is_even_MN=*/true, Is_even_K>(
-            gmem_tiled_copy_QKV, tVgV(_, _, _, n_block), params, tVsV, tKVcKV, tKVpKV, bidb, bidh, n_block, 0);""",
+            gmem_tiled_copy_QKV, tVgV(_, _, _, n_block), params, tVsV, tKVcKV, tKVpKV, bidb, bidh, n_block,
+            varq_packed_smem, 0);""",
     ),
     (
         """flash::copy<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
@@ -47,8 +49,99 @@ V_COPY_PATTERNS = (
             );""",
         """flash::varq_copy_v_tile<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
                 gmem_tiled_copy_QKV, tVgV(_, _, _, n_block), params, tVsV, tKVcKV, tKVpKV, bidb, bidh, n_block,
-                binfo.actual_seqlen_k - n_block * kBlockN
+                varq_packed_smem, binfo.actual_seqlen_k - n_block * kBlockN
             );""",
+    ),
+)
+
+
+FLASH_KERNEL_PIPELINE_PATTERNS = (
+    (
+        """    Tensor sVtNoSwizzle = make_tensor(sV.data().get(), typename Kernel_traits::SmemLayoutVtransposedNoSwizzle{});""",
+        """    Tensor sVtNoSwizzle = make_tensor(sV.data().get(), typename Kernel_traits::SmemLayoutVtransposedNoSwizzle{});
+    int32_t *varq_packed_smem = reinterpret_cast<int32_t *>(smem_ + Kernel_traits::kSmemSize);""",
+    ),
+    (
+        """        flash::cp_async_wait<0>();
+        __syncthreads();
+
+        // Advance gV""",
+        """        flash::cp_async_wait<0>();
+        __syncthreads();
+        bool varq_finalized_k = false;
+        if (masking_step == 0) {
+            varq_finalized_k = flash::varq_finalize_k_tile<Is_even_MN, Is_even_K>(
+                params, tKsK, tKVcKV, tKVpKV, varq_packed_smem, bidb, bidh, n_block,
+                binfo.actual_seqlen_k - n_block * kBlockN);
+        } else {
+            varq_finalized_k = flash::varq_finalize_k_tile</*Is_even_MN=*/true, Is_even_K>(
+                params, tKsK, tKVcKV, tKVpKV, varq_packed_smem, bidb, bidh, n_block, 0);
+        }
+        if (varq_finalized_k) { __syncthreads(); }
+
+        // Advance gV""",
+    ),
+    (
+        """        mask.template apply_mask<Is_causal, Is_even_MN>(
+            acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
+        );
+
+        flash::cp_async_wait<0>();
+        __syncthreads();""",
+        """        mask.template apply_mask<Is_causal, Is_even_MN>(
+            acc_s, n_block * kBlockN, m_block * kBlockM + (tidx / 32) * 16 + (tidx % 32) / 4, kNWarps * 16
+        );
+
+        flash::cp_async_wait<0>();
+        __syncthreads();
+        bool varq_finalized_v = false;
+        if (masking_step > 0) {
+            varq_finalized_v = flash::varq_finalize_v_tile</*Is_even_MN=*/true, Is_even_K>(
+                params, tVsV, tKVcKV, tKVpKV, varq_packed_smem, bidb, bidh, n_block, 0);
+        } else {
+            varq_finalized_v = flash::varq_finalize_v_tile<Is_even_MN, Is_even_K, /*Clear_OOB_MN=*/true>(
+                params, tVsV, tKVcKV, tKVpKV, varq_packed_smem, bidb, bidh, n_block,
+                binfo.actual_seqlen_k - n_block * kBlockN);
+        }
+        if (varq_finalized_v) { __syncthreads(); }""",
+    ),
+    (
+        """        flash::cp_async_wait<0>();
+        __syncthreads();
+        flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV(_, _, _, n_block), tVsV, tKVcKV, tKVpKV);""",
+        """        flash::cp_async_wait<0>();
+        __syncthreads();
+        if (flash::varq_finalize_k_tile</*Is_even_MN=*/true, Is_even_K>(
+                params, tKsK, tKVcKV, tKVpKV, varq_packed_smem, bidb, bidh, n_block, 0)) {
+            __syncthreads();
+        }
+        flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tVgV(_, _, _, n_block), tVsV, tKVcKV, tKVpKV);""",
+    ),
+    (
+        """        flash::cp_async_wait<0>();
+        __syncthreads();
+        if (n_block > n_block_min) {
+            flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK(_, _, _, n_block - 1), tKsK, tKVcKV, tKVpKV);
+            // This cp_async_fence needs to be in the if block, otherwise the synchronization
+            // isn't right and we get race conditions.
+            cute::cp_async_fence();
+        }
+
+        mask.template apply_mask</*Causal_mask=*/false>(""",
+        """        flash::cp_async_wait<0>();
+        __syncthreads();
+        if (flash::varq_finalize_v_tile</*Is_even_MN=*/true, Is_even_K>(
+                params, tVsV, tKVcKV, tKVpKV, varq_packed_smem, bidb, bidh, n_block, 0)) {
+            __syncthreads();
+        }
+        if (n_block > n_block_min) {
+            flash::copy</*Is_even_MN=*/true, Is_even_K>(gmem_tiled_copy_QKV, tKgK(_, _, _, n_block - 1), tKsK, tKVcKV, tKVpKV);
+            // This cp_async_fence needs to be in the if block, otherwise the synchronization
+            // isn't right and we get race conditions.
+            cute::cp_async_fence();
+        }
+
+        mask.template apply_mask</*Causal_mask=*/false>(""",
     ),
 )
 
@@ -78,6 +171,13 @@ def generate_varq_flash_sources(flash_attn_src: Path, build_dir: Path) -> Path:
     generated_dir.mkdir(parents=True, exist_ok=True)
     src = flash_attn_src / "csrc" / "flash_attn" / "src" / "flash_fwd_kernel.h"
     text = src.read_text()
+    for idx, (old, new) in enumerate(FLASH_KERNEL_PIPELINE_PATTERNS):
+        if old not in text:
+            raise RuntimeError(f"VAR-Q flash pipeline patch pattern not found:\n{old}")
+        # The first three snippets also occur in split-kv. The direct VAR-Q backend
+        # only patches compute_attn_1rowblock.
+        replace_count = 1 if idx < 3 else -1
+        text = text.replace(old, new, replace_count)
     for old, new in (*K_COPY_PATTERNS, *V_COPY_PATTERNS):
         if old not in text:
             raise RuntimeError(f"VAR-Q flash patch pattern not found:\n{old}")

@@ -162,11 +162,84 @@ __forceinline__ __device__ __half2 varq_dequant_q8_pair(
     return __hmul2(q8_pair, scale_value);
 }
 
+constexpr int kVarqPackedWords = 32;
+
+template <typename Kernel_traits>
+struct VarqPackedTileSmem {
+    static constexpr int kBytes =
+        Kernel_traits::kBlockN * kVarqPackedWords * static_cast<int>(sizeof(int32_t));
+};
+
+__forceinline__ __device__ bool varq_is_cached_uniform_tile(
+    const Varq_fwd_params &params,
+    const int n_block,
+    int &step) {
+    const int first_n = n_block * params.varq_block_n;
+    const int last_n = first_n + params.varq_block_n - 1;
+    if (last_n >= params.varq_cached_len) {
+        return false;
+    }
+    const int32_t *step_ids = reinterpret_cast<const int32_t *>(params.varq_step_ids_ptr);
+    const int first_step = step_ids[first_n];
+    const int last_step = step_ids[last_n];
+    if (first_step != last_step) {
+        return false;
+    }
+    step = first_step;
+    return true;
+}
+
+__forceinline__ __device__ void varq_cp_async_cg_16(
+    void *smem_ptr,
+    const void *gmem_ptr) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    const uint32_t smem_addr =
+        static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" : :
+                 "r"(smem_addr), "l"(gmem_ptr));
+#else
+    *reinterpret_cast<uint4 *>(smem_ptr) =
+        *reinterpret_cast<const uint4 *>(gmem_ptr);
+#endif
+}
+
+template <bool IsK>
+__forceinline__ __device__ void varq_stage_cached_uniform_tile(
+    const Varq_fwd_params &params,
+    int32_t *packed_smem,
+    const int bidb,
+    const int bidh,
+    const int n_block) {
+    constexpr int kWordsPerCopy = 4;
+    constexpr int kVecsPerRow = kVarqPackedWords / kWordsPerCopy;
+    const int64_t head_idx = bidb * params.h + bidh;
+    const int n_block_base = n_block * params.varq_block_n;
+    const int32_t *packed = reinterpret_cast<const int32_t *>(
+        IsK ? params.varq_k_packed_ptr : params.varq_v_packed_ptr);
+    const int64_t packed_head_offset =
+        head_idx * params.varq_cached_len * kVarqPackedWords;
+    const int total_vecs = params.varq_block_n * kVecsPerRow;
+    for (int vec_idx = threadIdx.x; vec_idx < total_vecs; vec_idx += blockDim.x) {
+        const int row = vec_idx / kVecsPerRow;
+        const int vec_in_row = vec_idx - row * kVecsPerRow;
+        const int word_idx = vec_in_row * kWordsPerCopy;
+        const int64_t global_word =
+            packed_head_offset
+            + static_cast<int64_t>(n_block_base + row) * kVarqPackedWords
+            + word_idx;
+        const int smem_word = row * kVarqPackedWords + word_idx;
+        varq_cp_async_cg_16(
+            packed_smem + smem_word,
+            packed + global_word);
+    }
+}
+
 template <bool IsK, bool Is_even_MN, bool Is_even_K, bool Clear_OOB_MN, bool Clear_OOB_K,
           typename EngineD, typename LayoutD, typename EngineCoord, typename LayoutCoord,
           typename EnginePred, typename LayoutPred>
 __forceinline__ __device__ void varq_copy_cached_uniform_tile(
     const Varq_fwd_params &params,
+    const int32_t *packed_smem,
     cute::Tensor<EngineD, LayoutD> &D,
     cute::Tensor<EngineCoord, LayoutCoord> const &identity_MN,
     cute::Tensor<EnginePred, LayoutPred> const &predicate_K,
@@ -176,16 +249,12 @@ __forceinline__ __device__ void varq_copy_cached_uniform_tile(
     const int step,
     const int max_MN=0) {
     CUTE_STATIC_ASSERT_V(cute::rank(D) == cute::Int<3>{});
-    constexpr int kPackedWords = 32;
+    static_cast<void>(n_block);
     const int64_t head_idx = bidb * params.h + bidh;
-    const int32_t *packed = reinterpret_cast<const int32_t *>(
-        IsK ? params.varq_k_packed_ptr : params.varq_v_packed_ptr);
     const cutlass::half_t *scale = reinterpret_cast<const cutlass::half_t *>(
         IsK ? params.varq_k_scale_ptr : params.varq_v_scale_ptr);
-    const int64_t packed_head_offset = head_idx * params.varq_cached_len * kPackedWords;
     const int64_t scale_head_step_offset =
         (head_idx * params.varq_num_steps + step) * params.d;
-    const int n_block_base = n_block * params.varq_block_n;
     #pragma unroll
     for (int k = 0; k < cute::size<2>(D); ++k) {
         if (Is_even_K || predicate_K(k)) {
@@ -202,11 +271,10 @@ __forceinline__ __device__ void varq_copy_cached_uniform_tile(
                             auto d_vec = D(cute::_, m, k);
                             cutlass::Array<cutlass::half_t, kVecSize> values;
                             const int local_n = cute::get<0>(identity_MN(0, m, k));
-                            const int n = n_block_base + local_n;
                             const int64_t packed_offset =
-                                packed_head_offset + static_cast<int64_t>(n) * kPackedWords + word_idx0;
+                                static_cast<int64_t>(local_n) * kVarqPackedWords + word_idx0;
                             const uint64_t packed64 =
-                                *reinterpret_cast<const uint64_t *>(packed + packed_offset);
+                                *reinterpret_cast<const uint64_t *>(packed_smem + packed_offset);
                             const int32_t word0 = static_cast<int32_t>(packed64 & 0xffffffffu);
                             const int32_t word1 = static_cast<int32_t>(packed64 >> 32);
                             __half2 *value_pair = reinterpret_cast<__half2 *>(values.data());
@@ -243,12 +311,11 @@ __forceinline__ __device__ void varq_copy_cached_uniform_tile(
                     int cached_word_idx = -1;
                     int32_t cached_word = 0;
                     const int local_n0 = cute::get<0>(identity_MN(0, m, k));
-                    const int n = n_block_base + local_n0;
                     #pragma unroll
                     for (int c = 0; c < cute::size<0>(D); ++c) {
                         const int word_idx = word_idx_values[c];
                         if (word_idx != cached_word_idx) {
-                            cached_word = packed[packed_head_offset + static_cast<int64_t>(n) * kPackedWords + word_idx];
+                            cached_word = packed_smem[static_cast<int64_t>(local_n0) * kVarqPackedWords + word_idx];
                             cached_word_idx = word_idx;
                         }
                         values[c] = varq_dequant_q8_lane(cached_word, lane_values[c], scale_values[c]);
@@ -266,6 +333,31 @@ __forceinline__ __device__ void varq_copy_cached_uniform_tile(
             }
         }
     }
+}
+
+template <bool IsK, bool Is_even_MN, bool Is_even_K, bool Clear_OOB_MN, bool Clear_OOB_K,
+          typename EngineD, typename LayoutD, typename EngineCoord, typename LayoutCoord,
+          typename EnginePred, typename LayoutPred>
+__forceinline__ __device__ bool varq_finalize_cached_uniform_tile(
+    const Varq_fwd_params &params,
+    const int32_t *packed_smem,
+    cute::Tensor<EngineD, LayoutD> &D,
+    cute::Tensor<EngineCoord, LayoutCoord> const &identity_MN,
+    cute::Tensor<EnginePred, LayoutPred> const &predicate_K,
+    const int bidb,
+    const int bidh,
+    const int n_block,
+    const int max_MN=0) {
+    if (packed_smem == nullptr) {
+        return false;
+    }
+    int step = 0;
+    if (!varq_is_cached_uniform_tile(params, n_block, step)) {
+        return false;
+    }
+    varq_copy_cached_uniform_tile<IsK, Is_even_MN, Is_even_K, Clear_OOB_MN, Clear_OOB_K>(
+        params, packed_smem, D, identity_MN, predicate_K, bidb, bidh, n_block, step, max_MN);
+    return true;
 }
 
 template <bool IsK, bool Is_even_MN, bool Is_even_K, bool Clear_OOB_MN, bool Clear_OOB_K,
@@ -374,6 +466,7 @@ __forceinline__ __device__ void varq_copy_kv_tile(
     const int bidb,
     const int bidh,
     const int n_block,
+    int32_t *packed_smem,
     const int max_MN=0) {
     CUTE_STATIC_ASSERT_V(cute::rank(D) == cute::Int<3>{});
     const int first_n = n_block * params.varq_block_n;
@@ -388,8 +481,13 @@ __forceinline__ __device__ void varq_copy_kv_tile(
         const int first_step = step_ids[first_n];
         const int last_step = step_ids[last_n];
         if (first_step == last_step) {
-            varq_copy_cached_uniform_tile<IsK, Is_even_MN, Is_even_K, Clear_OOB_MN, Clear_OOB_K>(
-                params, D, identity_MN, predicate_K, bidb, bidh, n_block, first_step, max_MN);
+            if (packed_smem != nullptr) {
+                varq_stage_cached_uniform_tile<IsK>(params, packed_smem, bidb, bidh, n_block);
+                return;
+            }
+            // Keep a correct fallback if an older generated call site omits scratch smem.
+            varq_copy_mixed_tile<IsK, Is_even_MN, Is_even_K, Clear_OOB_MN, Clear_OOB_K>(
+                tiled_copy, S, params, D, identity_MN, predicate_K, bidb, bidh, n_block, max_MN);
             return;
         }
     }
@@ -411,9 +509,10 @@ __forceinline__ __device__ void varq_copy_k_tile(
     const int bidb,
     const int bidh,
     const int n_block,
+    int32_t *packed_smem,
     const int max_MN=0) {
     varq_copy_kv_tile<true, Is_even_MN, Is_even_K, Clear_OOB_MN, Clear_OOB_K>(
-        tiled_copy, S, params, D, identity_MN, predicate_K, bidb, bidh, n_block, max_MN);
+        tiled_copy, S, params, D, identity_MN, predicate_K, bidb, bidh, n_block, packed_smem, max_MN);
 }
 
 template <bool Is_even_MN=true, bool Is_even_K=true, bool Clear_OOB_MN=false, bool Clear_OOB_K=true,
@@ -430,9 +529,44 @@ __forceinline__ __device__ void varq_copy_v_tile(
     const int bidb,
     const int bidh,
     const int n_block,
+    int32_t *packed_smem,
     const int max_MN=0) {
     varq_copy_kv_tile<false, Is_even_MN, Is_even_K, Clear_OOB_MN, Clear_OOB_K>(
-        tiled_copy, S, params, D, identity_MN, predicate_K, bidb, bidh, n_block, max_MN);
+        tiled_copy, S, params, D, identity_MN, predicate_K, bidb, bidh, n_block, packed_smem, max_MN);
+}
+
+template <bool Is_even_MN=true, bool Is_even_K=true, bool Clear_OOB_MN=false, bool Clear_OOB_K=true,
+          typename EngineD, typename LayoutD, typename EngineCoord, typename LayoutCoord,
+          typename EnginePred, typename LayoutPred>
+__forceinline__ __device__ bool varq_finalize_k_tile(
+    const Varq_fwd_params &params,
+    cute::Tensor<EngineD, LayoutD> &D,
+    cute::Tensor<EngineCoord, LayoutCoord> const &identity_MN,
+    cute::Tensor<EnginePred, LayoutPred> const &predicate_K,
+    const int32_t *packed_smem,
+    const int bidb,
+    const int bidh,
+    const int n_block,
+    const int max_MN=0) {
+    return varq_finalize_cached_uniform_tile<true, Is_even_MN, Is_even_K, Clear_OOB_MN, Clear_OOB_K>(
+        params, packed_smem, D, identity_MN, predicate_K, bidb, bidh, n_block, max_MN);
+}
+
+template <bool Is_even_MN=true, bool Is_even_K=true, bool Clear_OOB_MN=false, bool Clear_OOB_K=true,
+          typename EngineD, typename LayoutD, typename EngineCoord, typename LayoutCoord,
+          typename EnginePred, typename LayoutPred>
+__forceinline__ __device__ bool varq_finalize_v_tile(
+    const Varq_fwd_params &params,
+    cute::Tensor<EngineD, LayoutD> &D,
+    cute::Tensor<EngineCoord, LayoutCoord> const &identity_MN,
+    cute::Tensor<EnginePred, LayoutPred> const &predicate_K,
+    const int32_t *packed_smem,
+    const int bidb,
+    const int bidh,
+    const int n_block,
+    const int max_MN=0) {
+    return varq_finalize_cached_uniform_tile<false, Is_even_MN, Is_even_K, Clear_OOB_MN, Clear_OOB_K>(
+        params, packed_smem, D, identity_MN, predicate_K, bidb, bidh, n_block, max_MN);
 }
 
 }  // namespace flash
