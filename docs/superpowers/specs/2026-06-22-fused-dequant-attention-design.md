@@ -210,3 +210,42 @@ re-bench. End-to-end Infinity-8B run is deferred: it needs ~23GB+ of weights and
 the shared A100 box currently has only ~17GB free per GPU (vLLM TP serving job
 holds 64GB on all 8 GPUs), and the kernel isn't yet fast enough to show an e2e
 delta regardless.
+
+## Measured e2e result — Infinity-8B (A100 .101, 2026-06-24)
+
+Ran `scripts/bench/bench_infinity_e2e.py` on a second A100 box (10.19.2.101,
+free GPUs) with the real Infinity-8B model (1024px, pn=1M, 3 timed iters).
+Authoritative 8B args from `tools/interactive_infer_8b.ipynb`: `vae_type=14,
+apply_spatial_patchify=1, add_lvl_embeding_only_first_block=1,
+checkpoint_type=torch_shard`.
+
+| case | s/img | vs fp16 |
+|------|-------|---------|
+| fp16 (no quant) | 3.35 | 1.00x |
+| varq8 (quant KV, no fusion / Triton) | 4.46 | 1.33x slower |
+| varq8_fused (cuda dense bridge, bf16) | 4.58 | 1.37x slower |
+
+(First run hit `x has unexpected dtype` — the kernel was fp16-only but
+Infinity-8B is bf16. After adding bf16 support to the dense bridge + casting
+post-rope fp32 q/k/v to bf16 in the wrapper, varq8_fused runs end-to-end.)
+
+**Two findings that reframe the work:**
+
+1. **Quantized KV is *slower* than fp16 at the e2e level (4.46 vs 3.35 s/img).**
+   Quant's payoff is memory, not speed; the per-step dequant is pure overhead.
+   This reframes the fused kernel's goal: not "beat fp16," but **erase the
+   quant speed penalty** — pull varq8 back from 4.46s toward fp16's 3.35s while
+   keeping the memory savings. The ~1.62x microbench ceiling is exactly that
+   recovery (relative to the dequant→flash production path).
+
+2. **The dense-bridge fused path does not deliver that recovery.** varq8_fused
+   (4.58s) is marginally *slower* than non-fused varq8 (4.46s) — the bridge still
+   materializes full bf16 K/V, so there is no fusion win, exactly as the
+   microbench predicted (dense 1.04x). The only route to the recovery is the
+   **direct cp.async path** (dequant-on-load without materializing K/V), which is
+   the remaining open work.
+
+3. **bf16 was a prerequisite just to run.** The fp16-only kernel raised
+   `x has unexpected dtype` on the bf16 model; the fp16 microbench never exposed
+   it. Fixed by templatizing the dense bridge on output dtype + casting post-rope
+   fp32 q/k/v to bf16 in the wrapper. `fwd_direct` stays fp16-only for now.
