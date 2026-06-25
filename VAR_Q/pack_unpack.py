@@ -1,6 +1,6 @@
 # VAR_Q/pack_unpack.py
 import torch
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
 # ===== Optional Triton =====
 try:
@@ -94,7 +94,7 @@ if _HAS_TRITON:
 
     @triton.jit
     def _unpack_dequant2d_kernel(
-        packed_ptr, scale_ptr, out_ptr,
+        packed_ptr, scale_ptr, scale_group_ids_ptr, out_ptr,
         N_ROWS, C, C_OUT,
         B, L, H,
         OUT_S0, OUT_S1, OUT_S2, OUT_S3,
@@ -104,6 +104,7 @@ if _HAS_TRITON:
         VALS: tl.constexpr,
         BLOCK_VALS: tl.constexpr,
         QKV_FORMAT: tl.constexpr,
+        USE_SCALE_GROUP_IDS: tl.constexpr,
         BLOCK_ROWS: tl.constexpr,
         BLOCK_WORDS: tl.constexpr,
     ):
@@ -157,8 +158,12 @@ if _HAS_TRITON:
                 + out_cols * OUT_S3
             )
 
+        scale_l_idx = l_idx
+        if USE_SCALE_GROUP_IDS:
+            scale_l_idx = tl.load(scale_group_ids_ptr + l_idx, mask=mask_row, other=0)
+
         sb = tl.where(SCALE_D0 == 1, 0, b_idx)
-        sl = tl.where(SCALE_D1 == 1, 0, l_idx)
+        sl = tl.where(SCALE_D1 == 1, 0, scale_l_idx)
         sh = tl.where(SCALE_D2 == 1, 0, h_idx)
         sc = tl.where(SCALE_D3 == 1, 0, out_cols)
         scale_offsets = (
@@ -262,6 +267,7 @@ def unpack_dequant_last_dim_from_int32_triton(
     meta: dict,
     out: torch.Tensor,
     qkv_format: str,
+    scale_group_ids: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     assert _HAS_TRITON, "Triton is not available"
     assert packed.is_cuda and scale.is_cuda and out.is_cuda, "Triton version requires CUDA tensors"
@@ -287,6 +293,22 @@ def unpack_dequant_last_dim_from_int32_triton(
         B, L, H, _ = out.shape
     else:
         B, H, L, _ = out.shape
+    use_scale_group_ids = scale_group_ids is not None
+    if use_scale_group_ids:
+        assert scale_group_ids is not None
+        if not scale_group_ids.is_cuda:
+            raise ValueError("scale_group_ids must be a CUDA tensor")
+        if scale_group_ids.device != y.device:
+            raise ValueError(f"scale_group_ids must be on {y.device}, got {scale_group_ids.device}")
+        if scale_group_ids.dtype != torch.int32:
+            raise ValueError(f"scale_group_ids must have dtype torch.int32, got {scale_group_ids.dtype}")
+        if scale_group_ids.ndim != 1:
+            raise ValueError(f"scale_group_ids must be 1D, got ndim={scale_group_ids.ndim}")
+        if int(scale_group_ids.numel()) != int(L):
+            raise ValueError(f"scale_group_ids length must be {int(L)}, got {int(scale_group_ids.numel())}")
+        scale_group_ids_arg = scale_group_ids.contiguous()
+    else:
+        scale_group_ids_arg = y
     C_out = y.shape[-1]
     n_rows = int(y.numel() // C_out)
     y2d = y.view(n_rows, C_out)
@@ -305,6 +327,7 @@ def unpack_dequant_last_dim_from_int32_triton(
     _unpack_dequant2d_kernel[grid](
         y2d,
         s,
+        scale_group_ids_arg,
         out,
         n_rows,
         orig_c,
@@ -328,6 +351,7 @@ def unpack_dequant_last_dim_from_int32_triton(
         VALS=vals,
         BLOCK_VALS=block_vals,
         QKV_FORMAT=0 if qkv_format == "BLHc" else 1,
+        USE_SCALE_GROUP_IDS=use_scale_group_ids,
         BLOCK_ROWS=BR,
         BLOCK_WORDS=BW,
         num_warps=warps,

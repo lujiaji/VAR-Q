@@ -579,6 +579,31 @@ class VAR_Q:
         shape[-1] = int(meta["orig_c"])
         return shape
 
+    def _scale_group_ids_from_lengths(
+        self,
+        group_lengths: Sequence[int],
+        n_tokens: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if not group_lengths:
+            lengths = [n_tokens]
+        else:
+            lengths = [int(v) for v in group_lengths]
+        total_tokens = int(sum(lengths))
+        if total_tokens < n_tokens:
+            raise ValueError(
+                f"COMPACT_SCALE group_lengths cover {total_tokens} tokens, "
+                f"but packed tensor has {n_tokens}"
+            )
+        group_ids = torch.repeat_interleave(
+            torch.arange(len(lengths), device=device, dtype=torch.int32),
+            torch.tensor(lengths, device=device, dtype=torch.long),
+            output_size=total_tokens,
+        )
+        if total_tokens > n_tokens:
+            group_ids = group_ids[:n_tokens]
+        return group_ids.contiguous()
+
     def _write_packed_dequant_into_workspace(
         self,
         packed: torch.Tensor,
@@ -603,19 +628,19 @@ class VAR_Q:
                 group_lengths = [int(v) for v in quant_meta.get("group_lengths", ())]
                 if not group_lengths:
                     group_lengths = [int(packed.size(self.dim_cat))]
-                token_start = 0
-                for scale_idx, group_len in enumerate(group_lengths):
-                    token_end = min(token_start + group_len, int(packed.size(self.dim_cat)))
-                    if token_start >= token_end:
-                        break
-                    unpack_dequant_last_dim_from_int32_triton(
-                        self._slice_along_cat(packed, token_start, token_end),
-                        self._slice_along_cat(scale, scale_idx, scale_idx + 1),
-                        self._pack_meta,
-                        self._slice_along_cat(out, token_start, token_end),
-                        self.qkv_format,
-                    )
-                    token_start = token_end
+                scale_group_ids = self._scale_group_ids_from_lengths(
+                    group_lengths,
+                    int(packed.size(self.dim_cat)),
+                    packed.device,
+                )
+                unpack_dequant_last_dim_from_int32_triton(
+                    packed,
+                    scale,
+                    self._pack_meta,
+                    out,
+                    self.qkv_format,
+                    scale_group_ids=scale_group_ids,
+                )
             else:
                 unpack_dequant_last_dim_from_int32_triton(packed, scale, self._pack_meta, out, self.qkv_format)
             return out
