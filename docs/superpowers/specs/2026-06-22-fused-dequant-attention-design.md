@@ -390,10 +390,24 @@ dequant's latency isn't hidden because there are too few warps.
 
 **Fix + result:** added `__launch_bounds__(kNThreads, 3)` (branch
 `perf/a100-occupancy`, commit 0f1ada4, `-DVARQ_MIN_CTAS_PER_SM` overridable).
-cuobjdump confirms **255 → 168 regs, LOCAL:0 (no spill)** → 3 CTAs/SM = 18.75%
-occupancy. But microbench A/B (3 interleaved rounds, idle GPU, same as baseline):
-**direct 5.84 ms (occ) vs 5.88 ms (baseline) — identical.** Occupancy lift is a
-**no-op for speed. Not merged.**
+cuobjdump confirms **255 → 168 regs, LOCAL:0 (no spill)**. First A/B showed no
+change — but **that test was confounded**: A100 (sm80) actually dispatches the
+`blockN=64` traits (not 32), whose smem is ~72KB → occupancy is **smem-capped at
+2 CTAs/SM regardless of registers**. So launch_bounds dropped regs but occupancy
+stayed at 2 — the test never changed occupancy.
+
+**Proper test:** forced `blockN=32` on sm80 too (52KB smem → genuinely 3 CTAs/SM
+with the 168-reg cap; cuobjdump confirms 168 reg / 3 CTAs). A/B vs the default
+blockN=64 (2 CTAs), 3 interleaved rounds on an idle GPU:
+
+| config | occupancy | direct ms (mean) |
+|--------|-----------|------------------|
+| blockN=64 (default) | 2 CTAs / 12.5% | **5.82** |
+| blockN=32 + launch_bounds | 3 CTAs / 18.75% | 5.86 |
+
+**Occupancy genuinely does not help — 3 CTAs is even marginally slower** (the 2x
+tile/barrier count slightly outweighs the occupancy gain). **blockN=64 is optimal.
+Neither launch_bounds nor blockN=32 merged.**
 
 **What this rules out** (the direct path's ~1.97 ms dequant overhead over the
 3.88 ms fp16 ceiling is NOT):
