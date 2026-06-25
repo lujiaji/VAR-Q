@@ -79,6 +79,7 @@ def _build_parser(add_common_arguments) -> argparse.ArgumentParser:
     parser.add_argument("--config-4", default=str(_config_for_bits(4)))
     parser.add_argument("--config-2", default=str(_config_for_bits(2)))
     parser.add_argument("--fused-backend", default="cuda-direct", choices=("triton", "cuda", "cuda-direct"))
+    parser.add_argument("--profile", default="", help="if set to a case name, torch.profiler one generation of that case and print top CUDA ops by self time")
     parser.add_argument("--save-dir", default="", help="optional directory for first image from each case")
     parser.add_argument("--empty-cache-between", action="store_true")
     parser.add_argument("--json-out", default="", help="optional path to write JSON results")
@@ -290,6 +291,29 @@ def main() -> int:
                 _sync(device)
                 if args.empty_cache_between:
                     torch.cuda.empty_cache()
+
+            if args.profile and args.profile == case.name:
+                from torch.profiler import profile, ProfilerActivity
+
+                _sync(device)
+                with profile(
+                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                    with_stack=True,
+                ) as prof:
+                    image = _run_generation(
+                        gen_one_img, infinity, vae, text_tokenizer, text_encoder, case_args, scale_schedule
+                    )
+                    _sync(device)
+                del image
+                print(f"==== PROFILE case={case.name} top CUDA ops by self time ====", flush=True)
+                print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=30), flush=True)
+                print(f"==== PROFILE case={case.name} by call-stack (attribute copies/ops to source) ====", flush=True)
+                print(
+                    prof.key_averages(group_by_stack_n=6).table(
+                        sort_by="self_cuda_time_total", row_limit=30
+                    ),
+                    flush=True,
+                )
 
             times_s: list[float] = []
             first_image = None
