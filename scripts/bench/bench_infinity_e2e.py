@@ -80,6 +80,7 @@ def _build_parser(add_common_arguments) -> argparse.ArgumentParser:
     parser.add_argument("--config-2", default=str(_config_for_bits(2)))
     parser.add_argument("--fused-backend", default="cuda-direct", choices=("triton", "cuda", "cuda-direct"))
     parser.add_argument("--profile", default="", help="if set to a case name, torch.profiler one generation of that case and print top CUDA ops by self time")
+    parser.add_argument("--cprofile", default="", help="if set to a case name, cProfile one generation and print top Python fns by tottime (CPU-side overhead)")
     parser.add_argument("--save-dir", default="", help="optional directory for first image from each case")
     parser.add_argument("--empty-cache-between", action="store_true")
     parser.add_argument("--json-out", default="", help="optional path to write JSON results")
@@ -291,6 +292,24 @@ def main() -> int:
                 _sync(device)
                 if args.empty_cache_between:
                     torch.cuda.empty_cache()
+
+            if args.cprofile and args.cprofile == case.name:
+                import cProfile, pstats, io as _io
+
+                _sync(device)
+                pr = cProfile.Profile()
+                pr.enable()
+                image = _run_generation(
+                    gen_one_img, infinity, vae, text_tokenizer, text_encoder, case_args, scale_schedule
+                )
+                _sync(device)
+                pr.disable()
+                del image
+                s = _io.StringIO()
+                ps = pstats.Stats(pr, stream=s).sort_stats("tottime")
+                ps.print_stats(40)
+                print(f"==== CPROFILE case={case.name} top Python fns by tottime ====", flush=True)
+                print(s.getvalue(), flush=True)
 
             if args.profile and args.profile == case.name:
                 from torch.profiler import profile, ProfilerActivity
