@@ -213,8 +213,8 @@ delta regardless.
 
 ## Measured e2e result — Infinity-8B (A100 .101, 2026-06-24)
 
-Ran `scripts/bench/bench_infinity_e2e.py` on a second A100 box (10.19.2.101,
-free GPUs) with the real Infinity-8B model (1024px, pn=1M, 3 timed iters).
+Ran `scripts/bench/bench_infinity_e2e.py` on a second A100 80GB box (free GPUs at
+the time) with the real Infinity-8B model (1024px, pn=1M, 3 timed iters).
 Authoritative 8B args from `tools/interactive_infer_8b.ipynb`: `vae_type=14,
 apply_spatial_patchify=1, add_lvl_embeding_only_first_block=1,
 checkpoint_type=torch_shard`.
