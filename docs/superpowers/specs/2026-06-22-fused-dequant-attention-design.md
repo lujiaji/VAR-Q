@@ -424,3 +424,40 @@ is **scheme C: double-buffered dequant-ahead** (prefetch+dequant tile N+1 during
 tile N's MMA), which is the hard flash-pipeline rewrite. Two cheap layout tricks
 (dequant autotune, launch-bounds occupancy) are now both confirmed no-ops; the
 overhead is algorithmic, not a layout/occupancy tuning miss.
+
+## e2e profiling pivot — the dequant kernel is only ~5% (2026-06-25)
+
+Stopped optimizing the attention kernel in isolation and profiled the actual
+Infinity-8B generation (torch.profiler, idle GPU). This reframed everything:
+
+| op (varq8, 1 image) | CUDA self | calls | note |
+|---------------------|-----------|-------|------|
+| addmm + ampere gemm | ~2.6 s (78%) | — | core model, same as fp16 |
+| flash attention | 444 ms (13%) | 520 | same as fp16 |
+| aten::copy_ | 386 ms | **27403** | +20040 vs fp16 |
+| _unpack_dequant2d_kernel | 176 ms (**5%**) | **7280** | the dequant — small! |
+
+The attention dequant kernel (what scheme C / occupancy / autotune all targeted)
+is only ~5% of e2e. The eye-catching cost was the **op count**: the COMPACT_SCALE
+dequant looped per scale-group, launching ~7 kernels + ~21 slice-copies per
+`dequant_all`, i.e. 7280 launches and ~20k extra copies per image.
+
+**Fix (merged, commit 5e62aa2):** pass a per-token scale-group-id map to the
+Triton dequant kernel (like the direct kernel's step_ids) so it dequantizes the
+whole compact cache in ONE launch. Result: dequant launches **7280 → 1120
+(−85%)**, copies **27403 → 14203 (−48%)**, bit-exact (333 tests pass).
+
+**But the wall-clock win is only ~2%.** Same-GPU back-to-back e2e (varq8, 5 iters,
+pure-Python swap): new 4.30 s vs old 4.38 s (median 4.32 vs 4.38, min 4.15 vs
+4.33). Real but small. **Lesson: torch.profiler massively inflates CPU-dispatch
+cost; those 20k copies overlapped with GPU work and were nearly free in
+wall-clock.** The profile's apparent dispatch bottleneck was largely an artifact.
+
+**Standing conclusion on the quant penalty:** varq8 is ~33% slower than fp16 at
+e2e (~1.05 s), and that penalty is *distributed* across many small but real GPU
+ops (dequant kernel, quantize math abs/amax/div/mul, pack, cache cat, dtype
+casts) across 40 layers × ~13 steps — there is no single dominant lever. The
+biggest structural inefficiency found (per-group dequant looping) was worth ~2%.
+Further gains would be incremental grinding (fuse quantize scale-calc, cache
+management), each ~1-2%. Memory savings remain the real value of KV quant; the
+speed penalty is inherent to per-step quant+dequant, not a fixable hotspot.
