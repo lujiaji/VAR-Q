@@ -376,3 +376,37 @@ result — correct, best-of-three, faster than production on an unloaded GPU. Th
 two remaining levers (scheme C double-buffer; a hand-tuned dequant kernel) both
 need a *dedicated/idle* GPU to develop and validate against — which this shared
 box cannot currently provide. That's the gating constraint, not ideas.
+
+## A100 80GB layout pass (2026-06-25, idle GPUs available)
+
+With genuinely idle GPUs, profiled the direct kernel. ncu is blocked
+(`ERR_NVGPUCTRPERM` — no perf-counter permission in the container), but
+`cuobjdump --dump-resource-usage` works.
+
+**Occupancy diagnosis:** `varq_flash_fwd_kernel` had **no `__launch_bounds__`** →
+nvcc used **255 regs/thread** → register-limited to **2 CTAs/SM = 12.5%
+occupancy**, even though its ~52KB smem allows 3 CTAs. Hypothesis: the fused
+dequant's latency isn't hidden because there are too few warps.
+
+**Fix + result:** added `__launch_bounds__(kNThreads, 3)` (branch
+`perf/a100-occupancy`, commit 0f1ada4, `-DVARQ_MIN_CTAS_PER_SM` overridable).
+cuobjdump confirms **255 → 168 regs, LOCAL:0 (no spill)** → 3 CTAs/SM = 18.75%
+occupancy. But microbench A/B (3 interleaved rounds, idle GPU, same as baseline):
+**direct 5.84 ms (occ) vs 5.88 ms (baseline) — identical.** Occupancy lift is a
+**no-op for speed. Not merged.**
+
+**What this rules out** (the direct path's ~1.97 ms dequant overhead over the
+3.88 ms fp16 ceiling is NOT):
+- occupancy-limited (8→12 warps/SM changed nothing),
+- bank-conflict-bound (re-derived the thread→element map: within a warp adjacent
+  threads read adjacent head-chunks of the *same* row at 8-byte stride = coalesced,
+  no conflict),
+- compute-bound (unpacking 43M elements is ~11 µs of int/fp ALU).
+
+**Conclusion: the dequant overhead is serialized by the pipeline's
+`__syncthreads` barriers** — it sits between `cp_async_wait` and the gemm with no
+MMA to overlap it, so neither occupancy nor tiling helps. The **only** lever left
+is **scheme C: double-buffered dequant-ahead** (prefetch+dequant tile N+1 during
+tile N's MMA), which is the hard flash-pipeline rewrite. Two cheap layout tricks
+(dequant autotune, launch-bounds occupancy) are now both confirmed no-ops; the
+overhead is algorithmic, not a layout/occupancy tuning miss.
