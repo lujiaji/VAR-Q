@@ -377,7 +377,8 @@ at::Tensor fwd(
     at::Tensor v_scale,
     at::Tensor step_ids,
     at::Tensor k_fresh,
-    at::Tensor v_fresh) {
+    at::Tensor v_fresh,
+    double softmax_scale) {
     const at::cuda::CUDAGuard device_guard(q.device());
     validate_inputs(q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, /*allow_bf16=*/true);
 
@@ -410,6 +411,11 @@ at::Tensor fwd(
 
     Flash_fwd_params params;
     set_dense_fwd_params(params, q_blhc, k_dense, v_dense, out_blhc, softmax_lse);
+    // Override the default 1/sqrt(d) with the caller's softmax scale (Infinity's
+    // cos_attn uses self.scale=1, not 1/sqrt(d)).
+    params.scale_softmax = static_cast<float>(softmax_scale);
+    params.scale_softmax_log2 = params.scale_softmax * 1.4426950408889634f;
+    params.scale_softmax_rp_dropout = params.scale_softmax;
     if (q.scalar_type() == at::kHalf) {
         run_mha_fwd_<cutlass::half_t, kHeadDim, false>(params, stream);
     } else {
@@ -426,7 +432,8 @@ at::Tensor fwd_direct(
     at::Tensor v_scale,
     at::Tensor step_ids,
     at::Tensor k_fresh,
-    at::Tensor v_fresh) {
+    at::Tensor v_fresh,
+    double softmax_scale) {
     const at::cuda::CUDAGuard device_guard(q.device());
     validate_inputs(q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, /*allow_bf16=*/false);
 
@@ -444,6 +451,11 @@ at::Tensor fwd_direct(
         params, q_blhc, out_bhlc, softmax_lse,
         k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh,
         /*output_bhlc=*/true);
+    // Override the default 1/sqrt(d) with the caller's softmax scale (Infinity's
+    // cos_attn uses self.scale=1, not 1/sqrt(d)).
+    params.scale_softmax = static_cast<float>(softmax_scale);
+    params.scale_softmax_log2 = params.scale_softmax * 1.4426950408889634f;
+    params.scale_softmax_rp_dropout = params.scale_softmax;
     run_varq_mha_fwd_<cutlass::half_t, kHeadDim, false>(
         params, at::cuda::getCurrentCUDAStream().stream());
     return out_bhlc;

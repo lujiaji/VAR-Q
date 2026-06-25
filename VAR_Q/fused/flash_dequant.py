@@ -307,7 +307,7 @@ def _packed_attention(
 
 def _two_segment_attention(
     q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, bits,
-    block_m=128, block_n=32, num_warps=4, num_stages=2, fmt="BHLc",
+    block_m=128, block_n=32, num_warps=4, num_stages=2, fmt="BHLc", softmax_scale=None,
 ):
     """q/fresh in BHLc/BLHc, packed K/V in matching layout. Returns fp16 in q layout."""
     if bits != 8:
@@ -320,7 +320,7 @@ def _two_segment_attention(
     N_cached = k_packed.shape[seq_dim]
     N_fresh = k_fresh.shape[seq_dim]
     out = torch.empty_like(q)
-    sm_scale = 1.0 / math.sqrt(D)
+    sm_scale = (1.0 / math.sqrt(D)) if softmax_scale is None else float(softmax_scale)
     grid = (triton.cdiv(M, block_m), B * H)
     k_scale_strides = _scale_strides(k_scale, H)
     v_scale_strides = _scale_strides(v_scale, H)
@@ -361,11 +361,15 @@ def _normalize_backend(backend):
 
 
 def fused_dequant_attention(q, k_quant, v_quant, k_fresh, v_fresh,
-                            qkv_format="BHLc", backend="triton"):
+                            qkv_format="BHLc", backend="triton", softmax_scale=None):
     """Fused dequant + FA2 for one AR step.
 
     q, k_fresh, v_fresh: fp16 in qkv_format. k_quant/v_quant: VAR_Q with a
     packed VARQ cache. Returns attention output in qkv_format, fp16.
+
+    softmax_scale: the QK^T scale the caller's attention uses (e.g. the module's
+    self.scale). Infinity runs cos_attn so self.scale=1, not 1/sqrt(D) — callers
+    MUST pass it or the fused softmax is mis-scaled. None falls back to 1/sqrt(D).
     """
     backend = _normalize_backend(backend)
     bits = int(k_quant.quant_bits)
@@ -382,9 +386,9 @@ def fused_dequant_attention(q, k_quant, v_quant, k_fresh, v_fresh,
 
         return fused_flash_dequant_attention(
             q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh,
-            direct=backend == "cuda_direct",
+            direct=backend == "cuda_direct", softmax_scale=softmax_scale,
         )
     return _two_segment_attention(
         q, k_packed, v_packed, k_scale, v_scale, step_ids,
-        k_fresh, v_fresh, bits, fmt=qkv_format,
+        k_fresh, v_fresh, bits, fmt=qkv_format, softmax_scale=softmax_scale,
     )

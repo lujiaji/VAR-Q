@@ -61,6 +61,7 @@ def test_fused_flash_cuda_direct_matches_oracle():
     ext = flash_dequant_cuda.load_extension()
 
     out = ext.fwd_direct(
-        q, kp["packed"], vp["packed"], kp["scale"], vp["scale"], step_ids, fk, fv
+        q, kp["packed"], vp["packed"], kp["scale"], vp["scale"], step_ids, fk, fv,
+        float(q.shape[-1]) ** -0.5,  # softmax_scale = 1/sqrt(head_dim), matching the oracle
     )
     torch.testing.assert_close(out, ref, atol=3e-2, rtol=3e-2)

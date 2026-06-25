@@ -584,6 +584,7 @@ def _wrap_infinity_forward(handle: HookHandle, module: nn.Module) -> None:
                 q, self.k_quant, self.v_quant, k_fresh=k, v_fresh=v,
                 qkv_format=self.k_quant.qkv_format,
                 backend=getattr(self, "fused_kv_backend", "triton"),
+                softmax_scale=getattr(self, "scale", None),
             )
             if self.k_quant.qkv_format == "BHLc":
                 oup = oup.transpose(1, 2).reshape(B, L, C)

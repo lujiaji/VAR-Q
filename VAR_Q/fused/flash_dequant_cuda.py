@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,6 +106,7 @@ def fused_flash_dequant_attention(
     v_fresh: torch.Tensor,
     *,
     direct: bool = False,
+    softmax_scale: Optional[float] = None,
 ) -> torch.Tensor:
     """Call the CUDA fused FlashAttention backend.
 
@@ -130,8 +132,11 @@ def fused_flash_dequant_attention(
         q = q.to(target)
         k_fresh = k_fresh.to(target)
         v_fresh = v_fresh.to(target)
+    # softmax_scale: Infinity uses cos_attn so the module's self.scale is 1, not
+    # 1/sqrt(head_dim). Pass it through; None falls back to 1/sqrt(head_dim).
+    sm_scale = (1.0 / math.sqrt(q.shape[-1])) if softmax_scale is None else float(softmax_scale)
     out = getattr(ext, entrypoint)(
-        q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh
+        q, k_packed, v_packed, k_scale, v_scale, step_ids, k_fresh, v_fresh, sm_scale
     )
     if out.dtype != orig_dtype:
         out = out.to(orig_dtype)

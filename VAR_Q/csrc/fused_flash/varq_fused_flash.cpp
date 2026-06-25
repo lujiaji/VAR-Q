@@ -10,7 +10,8 @@ at::Tensor fwd(
     at::Tensor v_scale,
     at::Tensor step_ids,
     at::Tensor k_fresh,
-    at::Tensor v_fresh);
+    at::Tensor v_fresh,
+    double softmax_scale);
 
 at::Tensor fwd_direct(
     at::Tensor q,
@@ -20,7 +21,8 @@ at::Tensor fwd_direct(
     at::Tensor v_scale,
     at::Tensor step_ids,
     at::Tensor k_fresh,
-    at::Tensor v_fresh);
+    at::Tensor v_fresh,
+    double softmax_scale);
 
 std::string backend_info();
 
