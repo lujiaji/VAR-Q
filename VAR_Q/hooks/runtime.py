@@ -301,6 +301,12 @@ def _infinity_is_last_scale(module: nn.Module, scale_schedule: Any, scale_ind: i
     )
 
 
+def _should_use_fused_kv_attn(enabled, is_last_scale, qkv_format, bits):
+    """v1 fused path: only the last (two-segment) AR step, q8, known layout."""
+    return bool(enabled) and bool(is_last_scale) and int(bits) == 8 \
+        and qkv_format in ("BHLc", "BLHc")
+
+
 def _attention_enabled(module: nn.Module) -> bool:
     return bool(getattr(module, "caching", False)) and bool(getattr(module, "enable_quantization", False))
 
@@ -566,33 +572,52 @@ def _wrap_infinity_forward(handle: HookHandle, module: nn.Module) -> None:
         cache_current = not _infinity_is_last_scale(self, scale_schedule, scale_ind)
         if bool(getattr(self, "rescale_qk", False)):
             q, k = self.k_quant.rescale_qk(q, k)
-        k = _as_attention_dtype(_use_quantizer(self.k_quant, k, cache_current), q.dtype)
-        v = _as_attention_dtype(_use_quantizer(self.v_quant, v, cache_current), q.dtype)
 
-        if getattr(self, "using_flash", False):
-            flash_attn_func = globals_dict.get("flash_attn_func")
-            if flash_attn_func is None:
-                raise RuntimeError("flash_attn_func is not available in the third-party Infinity runtime.")
-            if attn_bias_or_two_vector is not None:
-                oup = flash_attn_func(
-                    q.to(main_type),
-                    k.to(main_type),
-                    v.to(main_type),
-                    dropout_p=0,
-                    softmax_scale=self.scale,
-                    VAR_visible_kvlen=attn_bias_or_two_vector[0],
-                    VAR_invisible_qlen=attn_bias_or_two_vector[1],
-                )
+        if _should_use_fused_kv_attn(
+            getattr(self, "enable_fused_kv_flashattn", False),
+            is_last_scale=not cache_current,
+            qkv_format=self.k_quant.qkv_format,
+            bits=self.k_quant.quant_bits,
+        ):
+            from VAR_Q.fused import fused_dequant_attention
+            oup = fused_dequant_attention(
+                q, self.k_quant, self.v_quant, k_fresh=k, v_fresh=v,
+                qkv_format=self.k_quant.qkv_format,
+                backend=getattr(self, "fused_kv_backend", "triton"),
+                softmax_scale=getattr(self, "scale", None),
+            )
+            if self.k_quant.qkv_format == "BHLc":
+                oup = oup.transpose(1, 2).reshape(B, L, C)
             else:
-                oup = flash_attn_func(q.to(main_type), k.to(main_type), v.to(main_type), dropout_p=0, softmax_scale=self.scale)
-            if oup.shape[1] != L:
-                oup = oup[:, -L:]
-            oup = oup.reshape(B, L, C)
-        elif getattr(self, "use_flex_attn", False) and attn_fn is not None:
-            oup = attn_fn(q, k, v, scale=self.scale).transpose(1, 2).reshape(B, L, C)
+                oup = oup.reshape(B, L, C)
         else:
-            attn_bias = None if attn_bias_or_two_vector is None else attn_bias_or_two_vector.to(x.device)
-            oup = _call_slow_attn(globals_dict, q, k, v, self.scale, attn_bias).transpose(1, 2).reshape(B, L, C)
+            k = _as_attention_dtype(_use_quantizer(self.k_quant, k, cache_current), q.dtype)
+            v = _as_attention_dtype(_use_quantizer(self.v_quant, v, cache_current), q.dtype)
+
+            if getattr(self, "using_flash", False):
+                flash_attn_func = globals_dict.get("flash_attn_func")
+                if flash_attn_func is None:
+                    raise RuntimeError("flash_attn_func is not available in the third-party Infinity runtime.")
+                if attn_bias_or_two_vector is not None:
+                    oup = flash_attn_func(
+                        q.to(main_type),
+                        k.to(main_type),
+                        v.to(main_type),
+                        dropout_p=0,
+                        softmax_scale=self.scale,
+                        VAR_visible_kvlen=attn_bias_or_two_vector[0],
+                        VAR_invisible_qlen=attn_bias_or_two_vector[1],
+                    )
+                else:
+                    oup = flash_attn_func(q.to(main_type), k.to(main_type), v.to(main_type), dropout_p=0, softmax_scale=self.scale)
+                if oup.shape[1] != L:
+                    oup = oup[:, -L:]
+                oup = oup.reshape(B, L, C)
+            elif getattr(self, "use_flex_attn", False) and attn_fn is not None:
+                oup = attn_fn(q, k, v, scale=self.scale).transpose(1, 2).reshape(B, L, C)
+            else:
+                attn_bias = None if attn_bias_or_two_vector is None else attn_bias_or_two_vector.to(x.device)
+                oup = _call_slow_attn(globals_dict, q, k, v, self.scale, attn_bias).transpose(1, 2).reshape(B, L, C)
 
         _release_attention_dequant_workspaces(self)
         del k, v
@@ -832,6 +857,7 @@ def _configure_attention(
         "empty_cache_policy": str(cfg.get("empty_cache_policy", "after_generation")),
         "empty_cache_threshold_bytes": int(cfg.get("empty_cache_threshold_bytes", 0) or 0),
         "enable_fused_kv_flashattn": bool(cfg.get("enable_fused_kv_flashattn", False)),
+        "fused_kv_backend": str(cfg.get("fused_kv_backend", "triton")),
         "debug_memory": bool(cfg.get("debug_memory", cfg.get("profile_memory", False))),
         "dequant_dtype": str(cfg.get("dequant_dtype", "native")),
         "quant_compute_dtype": str(cfg.get("quant_compute_dtype", "native")),
