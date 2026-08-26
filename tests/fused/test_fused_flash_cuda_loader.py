@@ -5,8 +5,8 @@ from VAR_Q.fused import flash_dequant_cuda
 from tests.fused import oracle
 
 
-def _build_case(device: str):
-    B, H, D, bits, fmt = 1, 2, 128, 8, "BHLc"
+def _build_case(device: str, bits: int = 8):
+    B, H, D, fmt = 1, 2, 128, "BHLc"
     torch.manual_seed(0)
     kq, ref_k = oracle.build_varq_cache([1, 2], B, H, D, bits, fmt, device, "k")
     vq, ref_v = oracle.build_varq_cache([1, 2], B, H, D, bits, fmt, device, "v")
@@ -34,7 +34,7 @@ def test_fused_flash_cuda_extension_exports_fwd():
     ext = flash_dequant_cuda.load_extension()
     assert callable(getattr(ext, "fwd", None))
     assert callable(getattr(ext, "fwd_direct", None))
-    assert "Track B" in ext.backend_info()
+    assert "attention_q_bits=8,6,4,3,2" in ext.backend_info()
 
 
 @pytest.mark.skipif(
@@ -55,9 +55,10 @@ def test_fused_flash_cuda_dense_bridge_matches_oracle():
     not flash_dequant_cuda.availability().available or not torch.cuda.is_available(),
     reason="VAR-Q fused FlashAttention CUDA extension is not built on CUDA",
 )
-def test_fused_flash_cuda_direct_matches_oracle():
+@pytest.mark.parametrize("bits", [8, 6, 4, 3, 2])
+def test_fused_flash_cuda_direct_matches_oracle(bits):
     device = "cuda"
-    q, kp, vp, step_ids, fk, fv, ref = _build_case(device)
+    q, kp, vp, step_ids, fk, fv, ref = _build_case(device, bits)
     ext = flash_dequant_cuda.load_extension()
 
     out = ext.fwd_direct(

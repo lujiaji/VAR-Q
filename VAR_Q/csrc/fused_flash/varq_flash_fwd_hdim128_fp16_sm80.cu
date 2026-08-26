@@ -64,7 +64,12 @@ template<>
 void run_varq_mha_fwd_<cutlass::half_t, 128, false>(Varq_fwd_params &params, cudaStream_t stream) {
     auto [cc_major, cc_minor] = get_compute_capability(get_current_device());
     const bool is_sm8x = cc_major == 8 && cc_minor > 0;
-    if (is_sm8x) {
+    // The same dynamic packed-format loader serves q8/q4/q3/q2.  A100 uses
+    // the BlockN=32 specialization to keep the q8 worst-case scratch tile
+    // within the resource envelope; lower bit-widths reuse the same ABI.
+    const bool is_sm80 = cc_major == 8 && cc_minor == 0;
+    const bool use_block_n32 = is_sm8x || is_sm80;
+    if (use_block_n32) {
         run_varq_flash_fwd<Flash_fwd_kernel_traits<128, 128, 32, 4, false, false, cutlass::half_t>>(params, stream);
     } else {
         run_varq_flash_fwd<Flash_fwd_kernel_traits<128, 128, 64, 4, false, false, cutlass::half_t>>(params, stream);

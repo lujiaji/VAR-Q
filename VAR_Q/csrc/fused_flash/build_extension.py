@@ -238,7 +238,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--flash-attn-src",
-        default=os.environ.get("FLASH_ATTN_SOURCE", "/work/flash-attention-v2.7.3"),
+        default=os.environ.get(
+            "FLASH_ATTN_SOURCE",
+            str(repo_root() / "third_party" / "flash-attention"),
+        ),
         help="flash-attention v2.7.3 source checkout with csrc/cutlass initialized",
     )
     parser.add_argument(

@@ -15,13 +15,15 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
 
 EXTENSION_NAME = "_varq_fused_flash"
 ENV_EXTENSION_PATH = "VARQ_FUSED_FLASH_EXT_PATH"
+SUPPORTED_Q_BITS = (2, 3, 4, 6, 8)
+_DTYPE_TO_CODE = {torch.float16: 0, torch.bfloat16: 1, torch.float32: 2}
 
 
 @dataclass(frozen=True)
@@ -110,23 +112,25 @@ def fused_flash_dequant_attention(
 ) -> torch.Tensor:
     """Call the CUDA fused FlashAttention backend.
 
-    Shapes for v1:
-    - q, k_fresh, v_fresh: BHLc fp16/bf16 tensors with head_dim=128 for
-      dense bridge; cuda-direct remains fp16-only
-    - k_packed, v_packed: BHLw int32 q8-packed cached tensors
-    - k_scale, v_scale: BHSd fp16 compact VARQ scales
-    - step_ids: int32 cached-token to scale-id map
+    Shapes:
+    - q, k_fresh, v_fresh: BHLc tensors.  CUDA supports fp16, bf16 and fp32
+      for the generic direct path; the legacy FlashAttention bridge keeps its
+      fp16/bf16 ABI.
+    - k_packed, v_packed: BHLw int32 cached tensors. Q2/Q3/Q4/Q6/Q8 are
+      dispatched from the packed width and head dimension.
+    - k_scale, v_scale: compact or broadcastable 4-D scales.
+    - step_ids: int32 cached-token to scale-id map.
     """
 
     ext = load_extension()
     entrypoint = "fwd_direct" if direct else "fwd"
     if not hasattr(ext, entrypoint):
         raise RuntimeError(f"{EXTENSION_NAME} is loaded but does not expose {entrypoint}()")
-    # The CUDA kernel accepts fp16 (both paths) or bf16 (dense bridge only).
-    # Infinity runs bf16 autocast but q/k/v can arrive as fp32 (e.g. after rope),
-    # so cast unsupported dtypes to the kernel's compute dtype and restore on output.
+    # The generic CUDA path accepts fp16, bf16, and fp32. The optimized Ampere
+    # loader remains specialized for fp16/head_dim=128. Cast any unsupported
+    # input dtype to a supported compute dtype and restore it on output.
     orig_dtype = q.dtype
-    supported = (torch.float16,) if direct else (torch.float16, torch.bfloat16)
+    supported = (torch.float16, torch.bfloat16, torch.float32)
     if orig_dtype not in supported:
         target = torch.float16 if direct else torch.bfloat16
         q = q.to(target)
@@ -141,3 +145,155 @@ def fused_flash_dequant_attention(
     if out.dtype != orig_dtype:
         out = out.to(orig_dtype)
     return out
+
+
+def _require_cuda(tensor: torch.Tensor, name: str) -> None:
+    if not isinstance(tensor, torch.Tensor) or not tensor.is_cuda:
+        raise RuntimeError(f"{name} must be a CUDA tensor; the CUDA extension is not loaded on CPU")
+
+
+def _layout_code(layout: str | int) -> int:
+    if isinstance(layout, int):
+        if layout not in (0, 1):
+            raise ValueError("layout must be 0/1 or BLHc/BHLc")
+        return int(layout)
+    value = str(layout).replace("-", "").replace("_", "").lower()
+    if value == "blhc":
+        return 0
+    if value == "bhlc":
+        return 1
+    raise ValueError("layout must be BLHc or BHLc")
+
+
+def _dtype_code(dtype: torch.dtype) -> int:
+    try:
+        return _DTYPE_TO_CODE[dtype]
+    except KeyError as exc:
+        raise ValueError("CUDA VAR-Q API supports float16, bfloat16 and float32") from exc
+
+
+def quantize_pack(
+    x: torch.Tensor,
+    bits: int,
+    *,
+    scale: Optional[torch.Tensor] = None,
+    group_ids: Optional[torch.Tensor] = None,
+    scale_dtype: Optional[torch.dtype] = None,
+    layout: str | int = "BLHc",
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """CUDA symmetric quantization + int32 packing.
+
+    ``x`` is packed along its last dimension.  If ``scale`` is omitted, a
+    per-row max-abs scale is computed in CUDA and returned.  A supplied scale
+    may be a broadcastable 4-D BLHc/BHLc tensor; ``group_ids`` optionally maps
+    the token axis to compact scale groups without materializing the expansion.
+    No CUDA extension is loaded merely by importing this module.
+    """
+
+    _require_cuda(x, "x")
+    bits = int(bits)
+    if bits not in SUPPORTED_Q_BITS:
+        raise ValueError(f"unsupported VAR-Q bit width {bits}; expected {SUPPORTED_Q_BITS}")
+    if scale is not None:
+        _require_cuda(scale, "scale")
+    if group_ids is not None:
+        _require_cuda(group_ids, "group_ids")
+        group_ids = group_ids.to(dtype=torch.int32).contiguous()
+    if scale_dtype is None:
+        scale_dtype = scale.dtype if scale is not None else torch.float32
+    scale_code = _dtype_code(scale_dtype)
+    ext = load_extension()
+    packed, used_scale = ext.quantize_pack(
+        x,
+        bits,
+        scale.contiguous() if scale is not None else None,
+        group_ids,
+        scale_code,
+        _layout_code(layout),
+    )
+    return packed, used_scale
+
+
+def pack_int8(q_int8: torch.Tensor, bits: int) -> torch.Tensor:
+    """Pack signed int8 values along the last dimension with a CUDA kernel."""
+
+    _require_cuda(q_int8, "q_int8")
+    if q_int8.dtype != torch.int8:
+        raise TypeError("q_int8 must have dtype torch.int8")
+    bits = int(bits)
+    if bits not in SUPPORTED_Q_BITS:
+        raise ValueError(f"unsupported VAR-Q bit width {bits}; expected {SUPPORTED_Q_BITS}")
+    return load_extension().pack_int8(q_int8, bits)
+
+
+def unpack_int8(
+    packed: torch.Tensor,
+    bits: int,
+    orig_dim: int = -1,
+) -> torch.Tensor:
+    """Unpack int32 words into signed int8 values using CUDA."""
+
+    _require_cuda(packed, "packed")
+    if packed.dtype != torch.int32:
+        raise TypeError("packed must have dtype torch.int32")
+    bits = int(bits)
+    if bits not in SUPPORTED_Q_BITS:
+        raise ValueError(f"unsupported VAR-Q bit width {bits}; expected {SUPPORTED_Q_BITS}")
+    return load_extension().unpack_int8(packed, bits, int(orig_dim))
+
+
+def unpack_dequant(
+    packed: torch.Tensor,
+    scale: torch.Tensor,
+    bits: int,
+    orig_dim: int = -1,
+    *,
+    output_dtype: Optional[torch.dtype] = None,
+    group_ids: Optional[torch.Tensor] = None,
+    layout: str | int = "BLHc",
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """CUDA unpack + dequant with FP16/BF16/FP32 scale and output support.
+
+    ``out`` may supply a contiguous destination workspace, avoiding an
+    extension-side allocation and a subsequent Python ``copy_``.
+    """
+
+    _require_cuda(packed, "packed")
+    _require_cuda(scale, "scale")
+    if packed.dtype != torch.int32:
+        raise TypeError("packed must have dtype torch.int32")
+    if scale.dtype not in _DTYPE_TO_CODE:
+        raise TypeError("scale must have dtype torch.float16/bfloat16/float32")
+    if out is not None:
+        _require_cuda(out, "out")
+        if out.dtype not in _DTYPE_TO_CODE:
+            raise TypeError("out must have dtype torch.float16/bfloat16/float32")
+        if output_dtype is not None and output_dtype != out.dtype:
+            raise ValueError("output_dtype must match out.dtype when out is supplied")
+        output_dtype = out.dtype
+    elif output_dtype is None:
+        output_dtype = scale.dtype
+    out_code = _dtype_code(output_dtype)
+    if group_ids is not None:
+        _require_cuda(group_ids, "group_ids")
+        group_ids = group_ids.to(dtype=torch.int32).contiguous()
+    bits = int(bits)
+    if bits not in SUPPORTED_Q_BITS:
+        raise ValueError(f"unsupported VAR-Q bit width {bits}; expected {SUPPORTED_Q_BITS}")
+    return load_extension().unpack_dequant(
+        packed,
+        scale.contiguous(),
+        bits,
+        int(orig_dim),
+        out_code,
+        group_ids,
+        _layout_code(layout),
+        out,
+    )
+
+
+cuda_quantize_pack = quantize_pack
+cuda_pack_int8 = pack_int8
+cuda_unpack_int8 = unpack_int8
+cuda_unpack_dequant = unpack_dequant

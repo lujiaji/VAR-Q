@@ -1,0 +1,15 @@
+{
+  "model": {"model_type": "infinity_8b"},
+  "quantization": {
+    "enable": true,
+    "q_bits": 6,
+    "quant_method": "VARQ",
+    "qkv_format": "BHLc",
+    "pack_to_int32": true,
+    "rescale_qk": false,
+    "enable_fused_kv_flashattn": true,
+    "fused_kv_backend": "cuda_direct"
+  },
+  "inference": {"device": "cuda", "seed": 0, "cfg": 3.0, "tau": 0.5, "h_div_w": 1, "enable_positive_prompt": 0},
+  "batch_processing": {"total_iters": 1000, "batch_size": 50}
+}

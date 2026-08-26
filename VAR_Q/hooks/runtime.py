@@ -302,8 +302,8 @@ def _infinity_is_last_scale(module: nn.Module, scale_schedule: Any, scale_ind: i
 
 
 def _should_use_fused_kv_attn(enabled, is_last_scale, qkv_format, bits):
-    """v1 fused path: only the last (two-segment) AR step, q8, known layout."""
-    return bool(enabled) and bool(is_last_scale) and int(bits) == 8 \
+    """Use the CUDA packed-KV path on the final two-segment AR step."""
+    return bool(enabled) and bool(is_last_scale) and int(bits) in (2, 3, 4, 6, 8) \
         and qkv_format in ("BHLc", "BLHc")
 
 
@@ -583,7 +583,7 @@ def _wrap_infinity_forward(handle: HookHandle, module: nn.Module) -> None:
             oup = fused_dequant_attention(
                 q, self.k_quant, self.v_quant, k_fresh=k, v_fresh=v,
                 qkv_format=self.k_quant.qkv_format,
-                backend=getattr(self, "fused_kv_backend", "triton"),
+                backend=getattr(self, "fused_kv_backend", "cuda_direct"),
                 softmax_scale=getattr(self, "scale", None),
             )
             if self.k_quant.qkv_format == "BHLc":
@@ -857,7 +857,7 @@ def _configure_attention(
         "empty_cache_policy": str(cfg.get("empty_cache_policy", "after_generation")),
         "empty_cache_threshold_bytes": int(cfg.get("empty_cache_threshold_bytes", 0) or 0),
         "enable_fused_kv_flashattn": bool(cfg.get("enable_fused_kv_flashattn", False)),
-        "fused_kv_backend": str(cfg.get("fused_kv_backend", "triton")),
+        "fused_kv_backend": str(cfg.get("fused_kv_backend", "cuda_direct")),
         "debug_memory": bool(cfg.get("debug_memory", cfg.get("profile_memory", False))),
         "dequant_dtype": str(cfg.get("dequant_dtype", "native")),
         "quant_compute_dtype": str(cfg.get("quant_compute_dtype", "native")),

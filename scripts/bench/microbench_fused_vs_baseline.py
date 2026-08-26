@@ -296,8 +296,8 @@ def main() -> int:
     parser.add_argument("--device", default="cuda", help="torch CUDA device")
     parser.add_argument(
         "--fused-backend",
-        choices=("triton", "cuda", "cuda-direct"),
-        default="triton",
+        choices=("cuda", "cuda-direct"),
+        default="cuda-direct",
         help="fused attention backend under test",
     )
     args = parser.parse_args()

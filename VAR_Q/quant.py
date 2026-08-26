@@ -2,24 +2,14 @@ import torch
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from VAR_Q.pack_unpack import (
-    _HAS_TRITON as _PACK_HAS_TRITON,
+    CUDA_PACK_BITS,
+    pack_last_dim_to_int32_cuda,
     pack_last_dim_to_int32_python,
+    quantize_pack_last_dim_to_int32_cuda,
+    unpack_dequant_last_dim_from_int32_cuda,
+    unpack_last_dim_from_int32_cuda,
     unpack_last_dim_from_int32_python,
-    TRITON_PACK_BITS,
 )
-
-try:
-    from VAR_Q.pack_unpack import (
-        unpack_dequant_last_dim_from_int32_triton,
-        pack_last_dim_to_int32_triton,
-        unpack_last_dim_from_int32_triton,
-    )
-    _HAS_TRITON = bool(_PACK_HAS_TRITON)
-except Exception:
-    unpack_dequant_last_dim_from_int32_triton = None
-    pack_last_dim_to_int32_triton = None
-    unpack_last_dim_from_int32_triton = None
-    _HAS_TRITON = False
 
 """
 For autoregressive (AR) models, image generation is performed across multiple scales.  
@@ -232,13 +222,11 @@ class VAR_Q:
         self._dequant_workspace_capacity: int = 0
         self._dequant_workspace_peak_bytes: int = 0
 
-        # Current step
         self.quantized_item: Optional[torch.Tensor] = None
         self.scale: Optional[torch.Tensor] = None
         self.quant_meta: Optional[Dict[str, Any]] = None
 
-        # pack/unpack meta (assuming c is constant across steps, so meta is constant)
-        self._pack_meta: Optional[Dict[str,int]] = None  # {'orig_c','vals_per_word','pad_len','bits'}
+        self._pack_meta: Optional[Dict[str,int]] = None
 
         # Per-step token counts for compact-scale methods
         # (G_SCALE_HEAD_DIM, VARQ, G_SCALE, G_TENSOR).
@@ -283,7 +271,6 @@ class VAR_Q:
     def qkv_format(self, fmt: str):
         self.set_qkv_format(fmt)
 
-    # ---------- Basic numerical operations ----------
     def _set_runtime_dequant_dtype(self, item_dtype: torch.dtype) -> None:
         dtype = resolve_dequant_dtype(self.dequant_dtype_config, fallback=item_dtype)
         if dtype != self.dequant_dtype:
@@ -348,6 +335,50 @@ class VAR_Q:
         q = torch.cat(q_chunks, dim=self.dim_cat)
         scale = torch.cat(scale_chunks, dim=self.dim_cat)
         return q, scale, chunk_lengths
+
+    def _quantize_pack_cuda(
+        self,
+        item: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, int]]:
+        return quantize_pack_last_dim_to_int32_cuda(
+            item,
+            scale,
+            self.quant_bits,
+            self.qkv_format,
+        )
+
+    def _quantize_pack_compact_chunks_cuda(
+        self,
+        item: torch.Tensor,
+        reduce_dims: Tuple[int, ...],
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[int], Dict[str, int]]:
+        chunk_lengths = self._compact_chunk_lengths(item)
+        if not chunk_lengths:
+            raise ValueError("Cannot quantize empty tensor with compact chunking.")
+        packed_chunks: List[torch.Tensor] = []
+        scale_chunks: List[torch.Tensor] = []
+        pack_meta: Optional[Dict[str, int]] = None
+        start = 0
+        for chunk_len in chunk_lengths:
+            end = start + chunk_len
+            chunk = self._slice_seq(item, start, end)
+            scale_chunk = self._compute_scale(chunk, reduce_dims, keepdim=True)
+            packed_chunk, current_meta = self._quantize_pack_cuda(chunk, scale_chunk)
+            if pack_meta is None:
+                pack_meta = current_meta
+            elif current_meta != pack_meta:
+                raise RuntimeError("inconsistent CUDA packed format across compact chunks")
+            packed_chunks.append(packed_chunk)
+            scale_chunks.append(scale_chunk)
+            start = end
+        assert pack_meta is not None
+        return (
+            torch.cat(packed_chunks, dim=self.dim_cat),
+            torch.cat(scale_chunks, dim=self.dim_cat),
+            chunk_lengths,
+            pack_meta,
+        )
 
     def _expand_scale_for_tensor(
         self,
@@ -613,10 +644,8 @@ class VAR_Q:
     ) -> torch.Tensor:
         assert self._pack_meta is not None, "pack meta is missing"
         if (
-            _HAS_TRITON
-            and packed.is_cuda
-            and int(self._pack_meta["bits"]) in TRITON_PACK_BITS
-            and unpack_dequant_last_dim_from_int32_triton is not None
+            packed.is_cuda
+            and int(self._pack_meta["bits"]) in CUDA_PACK_BITS
             and packed.ndim == 4
         ):
             packed = packed.detach()
@@ -633,7 +662,7 @@ class VAR_Q:
                     int(packed.size(self.dim_cat)),
                     packed.device,
                 )
-                unpack_dequant_last_dim_from_int32_triton(
+                unpack_dequant_last_dim_from_int32_cuda(
                     packed,
                     scale,
                     self._pack_meta,
@@ -642,7 +671,9 @@ class VAR_Q:
                     scale_group_ids=scale_group_ids,
                 )
             else:
-                unpack_dequant_last_dim_from_int32_triton(packed, scale, self._pack_meta, out, self.qkv_format)
+                unpack_dequant_last_dim_from_int32_cuda(
+                    packed, scale, self._pack_meta, out, self.qkv_format
+                )
             return out
 
         q_int8 = self._unpack_last_dim_from_int32(packed, self._pack_meta)
@@ -668,31 +699,35 @@ class VAR_Q:
             torch.mul(q_int8.to(self.dequant_dtype), expanded_scale.to(self.dequant_dtype), out=out)
         return out
     
-    # ---------- Pack/unpack last dimension to/from int32 ----------
     def _pack_last_dim_to_int32(self, q_int8: torch.Tensor, bits: int) -> Tuple[torch.Tensor, Dict[str,int]]:
-        if _HAS_TRITON and q_int8.is_cuda and bits in TRITON_PACK_BITS:
-            return pack_last_dim_to_int32_triton(q_int8, bits)
-        else:
-            return pack_last_dim_to_int32_python(q_int8, bits)
+        if q_int8.is_cuda and bits in CUDA_PACK_BITS:
+            return pack_last_dim_to_int32_cuda(q_int8, bits)
+        return pack_last_dim_to_int32_python(q_int8, bits)
 
     def _unpack_last_dim_from_int32(self, packed: torch.Tensor, meta: Dict[str,int]) -> torch.Tensor:
         bits = int(meta["bits"])
-        if _HAS_TRITON and packed.is_cuda and bits in TRITON_PACK_BITS:
-            return unpack_last_dim_from_int32_triton(packed, meta)
-        else:
-            return unpack_last_dim_from_int32_python(packed, meta)
+        if packed.is_cuda and bits in CUDA_PACK_BITS:
+            return unpack_last_dim_from_int32_cuda(packed, meta)
+        return unpack_last_dim_from_int32_python(packed, meta)
 
-    # ---------- Main quantization process ----------
     def quant(self, item: torch.Tensor):
         self._set_runtime_dequant_dtype(item.dtype)
         m = self.quant_method
         self.quant_meta = None
         self._cur_scale_L_counts = []
         red = self.dim_map[m]
+        already_packed = False
+        pack_meta: Optional[Dict[str, int]] = None
 
         if m in ('VARQ', 'G_SCALE_HEAD_DIM', 'G_TOKEN', 'G_TOKEN_HEAD', 'G_SCALE'):
             if m in ('VARQ', 'G_SCALE_HEAD_DIM', 'G_SCALE') and (self.compression_ratio < 1.0 or self.max_scale_seq_len is not None):
-                q, scale, chunk_lengths = self._quantize_compact_chunks(item, red)
+                if item.is_cuda and self.pack_to_int32:
+                    q, scale, chunk_lengths, pack_meta = self._quantize_pack_compact_chunks_cuda(
+                        item, red
+                    )
+                    already_packed = True
+                else:
+                    q, scale, chunk_lengths = self._quantize_compact_chunks(item, red)
                 self._cur_scale_L_counts = list(chunk_lengths)
                 self.quant_meta = {
                     "scheme": "COMPACT_SCALE",
@@ -702,7 +737,11 @@ class VAR_Q:
                 }
             else:
                 scale = self._compute_scale(item, red, keepdim=True)
-                q = self._quantize_to_int8(item, scale)
+                if item.is_cuda and self.pack_to_int32:
+                    q, pack_meta = self._quantize_pack_cuda(item, scale)
+                    already_packed = True
+                else:
+                    q = self._quantize_to_int8(item, scale)
                 if m in self._COMPACT_SCALE_METHODS:
                     self._cur_scale_L_counts = [q.size(self.dim_cat)]
 
@@ -711,15 +750,27 @@ class VAR_Q:
                 cached_deq = self.dequant_all()
                 cat = torch.cat([cached_deq, item], dim=self.dim_cat)
                 scale = self._compute_scale(cat, red, keepdim=True)
-                q = self._quantize_to_int8(cat, scale)
+                if cat.is_cuda and self.pack_to_int32:
+                    q, pack_meta = self._quantize_pack_cuda(cat, scale)
+                    already_packed = True
+                else:
+                    q = self._quantize_to_int8(cat, scale)
             else:
                 scale = self._compute_scale(item, red, keepdim=True)
-                q = self._quantize_to_int8(item, scale)
+                if item.is_cuda and self.pack_to_int32:
+                    q, pack_meta = self._quantize_pack_cuda(item, scale)
+                    already_packed = True
+                else:
+                    q = self._quantize_to_int8(item, scale)
         else:
             raise ValueError(f"[VAR-Q]: Invalid quantization method: {m}")
 
         if self.pack_to_int32:
-            q_packed, meta = self._pack_last_dim_to_int32(q, self.quant_bits)
+            if already_packed:
+                assert pack_meta is not None
+                q_packed, meta = q, pack_meta
+            else:
+                q_packed, meta = self._pack_last_dim_to_int32(q, self.quant_bits)
             if self._pack_meta is not None:
                 assert meta['bits'] == self._pack_meta['bits']
                 assert meta['vals_per_word'] == self._pack_meta['vals_per_word']
@@ -734,7 +785,6 @@ class VAR_Q:
 
     _COMPACT_SCALE_METHODS = frozenset(('VARQ', 'G_SCALE_HEAD_DIM', 'G_SCALE', 'G_TENSOR'))
 
-    # ---------- Write cache ----------
     def cache(self):
         m = self.quant_method
         q_cur = self.quantized_item
@@ -758,7 +808,6 @@ class VAR_Q:
         else:
             raise ValueError(f"[VAR-Q]: Invalid quantization method: {m}")
 
-    # ---------- Dequantization ----------
     def dequant_current(self) -> torch.Tensor:
         scale = self.scale
         quant_meta = _clone_quant_meta(self.quant_meta)
@@ -802,7 +851,6 @@ class VAR_Q:
             quant_meta["group_lengths"] = list(self._scale_L_counts)
         return self._write_dequant_into_workspace(q_int8, scale, quant_meta, out)
 
-    # Main external interface
     def quant_and_cache(self, item: torch.Tensor):
         self.quant(item)
         self.cache()
@@ -1078,13 +1126,7 @@ def dequantize_tensor(
         output_shape[-1] = int(pack_meta["orig_c"])
         if out is None:
             out = torch.empty(output_shape, dtype=target_dtype, device=packed.device)
-        if (
-            _HAS_TRITON
-            and packed.is_cuda
-            and bits in TRITON_PACK_BITS
-            and unpack_dequant_last_dim_from_int32_triton is not None
-            and packed.ndim == 4
-        ):
+        if packed.is_cuda and bits in CUDA_PACK_BITS and packed.ndim == 4:
             if _is_compact_scale_meta(quant_meta):
                 group_lengths = [int(value) for value in quant_meta.get("group_lengths", ())]
                 if not group_lengths:
@@ -1094,7 +1136,7 @@ def dequantize_tensor(
                     token_end = min(token_start + group_len, int(packed.size(seq_dim)))
                     if token_end <= token_start:
                         break
-                    unpack_dequant_last_dim_from_int32_triton(
+                    unpack_dequant_last_dim_from_int32_cuda(
                         _slice_dim(packed, seq_dim, token_start, token_end),
                         _slice_dim(scale, seq_dim, scale_idx, scale_idx + 1),
                         pack_meta,
@@ -1103,7 +1145,9 @@ def dequantize_tensor(
                     )
                     token_start = token_end
             else:
-                unpack_dequant_last_dim_from_int32_triton(packed, scale, pack_meta, out, qkv_format)
+                unpack_dequant_last_dim_from_int32_cuda(
+                    packed, scale, pack_meta, out, qkv_format
+                )
             return out
         q_int8 = unpack_last_dim_from_int32_python(packed, pack_meta)
     else:
@@ -1450,4 +1494,4 @@ def build_infinitystar_cache_quantizer(
     )
 
 
-HAS_TRITON_PACK = _HAS_TRITON
+HAS_CUDA_PACK = True
