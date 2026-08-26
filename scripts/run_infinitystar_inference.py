@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
-"""
-InfinityStar 推理脚本（含 VAR-Q），用于验证修复后的生成效果。
-
-运行方式一（本脚本，需在能正常 import torch 的环境下）:
-  cd VAR-Q && python scripts/run_infinitystar_inference.py
-
-运行方式二（使用现有 480p 脚本，推荐）:
-  cd VAR-Q
-  export ENABLE_VARQ=1
-  export INFINITY_SCHEDULE=infinity_star_interact
-  PYTHONPATH=$PWD python third_party/InfinityStar/tools/infer_video_480p.py
-  生成结果在 third_party/InfinityStar/output/gen_videos/demo.mp4
-"""
+"""Run InfinityStar inference with VAR-Q runtime hooks."""
 import os
 import sys
 import argparse
@@ -129,7 +117,6 @@ def main():
     args.use_flex_attn = 0
     args.rope2d_each_sa_layer = 1
     args.rope2d_normalized_by_hw = 2
-    # VAR-Q runtime config. Model/checkpoint paths stay outside public JSON files.
     args.enable_quantization = int(bool(quant_config.get("enable", True)))
     args.q_bits = int(quant_config.get("q_bits", 8))
     args.quant_method = str(quant_config.get("quant_method", "VARQ"))
@@ -137,7 +124,6 @@ def main():
     args.rescale_qk = int(bool(quant_config.get("rescale_qk", False)))
     args.ablation_config = ablation_config
 
-    # 其他 InfinityStar 所需
     for attr, val in [
         ("noise_input", 0),
         ("use_cfg", 0),

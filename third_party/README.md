@@ -22,7 +22,8 @@ git clone https://github.com/guandeh17/Self-Forcing third_party/Self-Forcing
 git clone https://github.com/NVlabs/LongLive third_party/LongLive
 ```
 
-Self-Forcing and LongLive currently expose `VideoKVCacheAdapter`, which must be called from a backend wrapper at the location where K/V tensors are produced. No patched upstream tree is included here.
+Self-Forcing and LongLive are installed automatically by their public launchers.
+No patched upstream tree is included here.
 
 Install every backend environment according to its official upstream README. VAR-Q does not define or pin the CUDA/PyTorch/attention stack for these repositories.
 
