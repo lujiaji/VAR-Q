@@ -14,26 +14,60 @@ from .weight_flexgen import (
     DEFAULT_FLexGen_CACHE_DIR,
     DEFAULT_WEIGHT_QUANT_METHOD,
     FLexGenLinearQuantizer,
+    GPTQLinearQuantizer,
+    GPTQ_WEIGHT_QUANT_METHOD,
     WeightQuantizationConfig,
     build_weight_quantization_config,
 )
-from .weight_flexgen_apply import maybe_apply_flexgen
+from .weight_flexgen_apply import maybe_apply_flexgen, maybe_apply_gptq
+from .activation_quant import ActivationQuantizationConfig, fake_quantize_activation
+from .nextframe_gptq import (
+    DeferredNextFrameQuantization,
+    GPTQFakeW4A8Linear,
+    NextFrameW4A8Runtime,
+    apply_nextframe_reference_quantization,
+    defer_nextframe_quantization_until_generator_ready,
+    load_nextframe_runtime_config,
+    remove_deferred_nextframe_quantization,
+)
+from .sparse_attention import (
+    regular_block_selection,
+    row_topk_block_selection,
+    sparse_attention,
+    streaming_keep_mask,
+)
 
 __all__ = [
     "ABLATION_METHODS",
     "DEFAULT_ABLATION_CACHE_DIR",
     "DEFAULT_FLexGen_CACHE_DIR",
     "DEFAULT_WEIGHT_QUANT_METHOD",
+    "GPTQ_WEIGHT_QUANT_METHOD",
     "AblationKVQuantizer",
+    "ActivationQuantizationConfig",
+    "DeferredNextFrameQuantization",
     "FLexGenLinearQuantizer",
+    "GPTQFakeW4A8Linear",
+    "GPTQLinearQuantizer",
+    "NextFrameW4A8Runtime",
     "WeightQuantizationConfig",
+    "apply_nextframe_reference_quantization",
     "build_ablation_config",
     "build_infinitystar_cache_quantizer",
     "build_kv_cache_quantizer",
     "build_weight_quantization_config",
     "dequantize_tensor",
+    "defer_nextframe_quantization_until_generator_ready",
+    "fake_quantize_activation",
     "is_ablation_method",
+    "load_nextframe_runtime_config",
     "maybe_apply_flexgen",
+    "maybe_apply_gptq",
     "normalize_ablation_method",
     "quantize_tensor",
+    "regular_block_selection",
+    "remove_deferred_nextframe_quantization",
+    "row_topk_block_selection",
+    "sparse_attention",
+    "streaming_keep_mask",
 ]

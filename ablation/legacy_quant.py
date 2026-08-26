@@ -4,15 +4,11 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 
-from .pack_unpack import TRITON_PACK_BITS, unpack_last_dim_from_int32_python
-
-try:
-    from .pack_unpack import unpack_last_dim_from_int32_triton
-
-    _HAS_TRITON = True
-except Exception:
-    unpack_last_dim_from_int32_triton = None
-    _HAS_TRITON = False
+from .pack_unpack import (
+    CUDA_PACK_BITS,
+    unpack_last_dim_from_int32_cuda,
+    unpack_last_dim_from_int32_python,
+)
 
 
 DEFAULT_KIVI_GROUP_SIZE = 128
@@ -234,8 +230,8 @@ def dequantize_tensor(
         if packed.dtype != torch.int32:
             raise ValueError(f"Expected packed int32 tensor when pack_meta is present, got {packed.dtype}")
         bits = int(pack_meta["bits"])
-        if _HAS_TRITON and packed.is_cuda and bits in TRITON_PACK_BITS:
-            q_int8 = unpack_last_dim_from_int32_triton(packed, pack_meta)
+        if packed.is_cuda and bits in CUDA_PACK_BITS:
+            q_int8 = unpack_last_dim_from_int32_cuda(packed, pack_meta)
         else:
             q_int8 = unpack_last_dim_from_int32_python(packed, pack_meta)
     else:
