@@ -3,7 +3,7 @@
   "varq_root": ".",
   "quant_method": "VARQ",
   "qkv_format": "BLHc",
-  "q_bits": 3,
+  "q_bits": 6,
   "pack_to_int32": true,
   "enable_fused_kv_flashattn": true,
   "fused_kv_backend": "cuda_direct",
