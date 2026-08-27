@@ -2,7 +2,7 @@ import pytest
 import torch
 
 from VAR_Q.fused import flash_dequant_cuda
-from tests.fused import oracle
+from . import oracle
 
 
 def _build_case(device: str, bits: int = 8):

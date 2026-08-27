@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from tests.fused import oracle
+from . import oracle
 
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
