@@ -1,5 +1,3 @@
 # Minimal VAR-Q core requirements.
 # Install each third-party backend environment from its official repository first.
 torch
-# Optional acceleration:
-# triton

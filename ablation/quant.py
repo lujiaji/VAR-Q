@@ -9,8 +9,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 import torch
 
 from .pack_unpack import (
-    TRITON_PACK_BITS,
+    CUDA_PACK_BITS,
+    pack_last_dim_to_int32_cuda,
     pack_last_dim_to_int32_python,
+    unpack_last_dim_from_int32_cuda,
     unpack_last_dim_from_int32_python,
 )
 from .legacy_quant import (
@@ -29,19 +31,6 @@ from .legacy_quant import (
     dequantize_tensor as legacy_dequantize_tensor,
     resolve_dequant_dtype,
 )
-
-try:
-    from .pack_unpack import (
-        pack_last_dim_to_int32_triton,
-        unpack_last_dim_from_int32_triton,
-    )
-
-    _HAS_TRITON = True
-except Exception:
-    pack_last_dim_to_int32_triton = None
-    unpack_last_dim_from_int32_triton = None
-    _HAS_TRITON = False
-
 
 ABLATION_METHODS = ("ABL_KIVI", "ABL_KIVI_CALI", "ABL_KV_FLexGen", "ABL_KVQUANT")
 ABLATION_METHOD_ALIASES = {
@@ -600,14 +589,14 @@ class AblationKVQuantizer:
         return self._nuq_codebook
 
     def _pack_last_dim_to_int32(self, q_int8: torch.Tensor, bits: int) -> Tuple[torch.Tensor, Dict[str, int]]:
-        if _HAS_TRITON and q_int8.is_cuda and bits in TRITON_PACK_BITS:
-            return pack_last_dim_to_int32_triton(q_int8, bits)
+        if q_int8.is_cuda and bits in CUDA_PACK_BITS:
+            return pack_last_dim_to_int32_cuda(q_int8, bits)
         return pack_last_dim_to_int32_python(q_int8, bits)
 
     def _unpack_last_dim_from_int32(self, packed: torch.Tensor, meta: Dict[str, int]) -> torch.Tensor:
         bits = int(meta["bits"])
-        if _HAS_TRITON and packed.is_cuda and bits in TRITON_PACK_BITS:
-            return unpack_last_dim_from_int32_triton(packed, meta)
+        if packed.is_cuda and bits in CUDA_PACK_BITS:
+            return unpack_last_dim_from_int32_cuda(packed, meta)
         return unpack_last_dim_from_int32_python(packed, meta)
 
     def _quantize_kivi(self, item: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
@@ -1300,8 +1289,8 @@ def dequantize_tensor(
     target_dtype = resolve_dequant_dtype(dequant_dtype)
     if pack_meta is not None:
         bits = int(pack_meta["bits"])
-        if _HAS_TRITON and packed.is_cuda and bits in TRITON_PACK_BITS:
-            q_int8 = unpack_last_dim_from_int32_triton(packed, pack_meta)
+        if packed.is_cuda and bits in CUDA_PACK_BITS:
+            q_int8 = unpack_last_dim_from_int32_cuda(packed, pack_meta)
         else:
             q_int8 = unpack_last_dim_from_int32_python(packed, pack_meta)
     else:

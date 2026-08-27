@@ -14,6 +14,7 @@ except Exception:  # pragma: no cover - transformers is optional for some entryp
 
 
 DEFAULT_WEIGHT_QUANT_METHOD = "FLexGen"
+GPTQ_WEIGHT_QUANT_METHOD = "GPTQ"
 DEFAULT_FLexGen_CACHE_DIR = "flexgen_cache"
 
 
@@ -42,10 +43,13 @@ class WeightQuantizationConfig:
     def validate(self) -> None:
         if not self.enable:
             return
-        if self.method != DEFAULT_WEIGHT_QUANT_METHOD:
-            raise ValueError(f"Only method={DEFAULT_WEIGHT_QUANT_METHOD} is supported, got {self.method}")
+        if self.method not in {DEFAULT_WEIGHT_QUANT_METHOD, GPTQ_WEIGHT_QUANT_METHOD}:
+            raise ValueError(
+                f"Only method={DEFAULT_WEIGHT_QUANT_METHOD} or "
+                f"{GPTQ_WEIGHT_QUANT_METHOD} is supported, got {self.method}"
+            )
         if self.q_bits != 4:
-            raise ValueError(f"FLexGen deployment in this repo is fixed to q_bits=4, got {self.q_bits}")
+            raise ValueError(f"Weight quantization is fixed to q_bits=4, got {self.q_bits}")
         if int(self.group_size) <= 0:
             raise ValueError(f"group_size must be positive, got {self.group_size}")
         if int(self.block_size) <= 0:
@@ -59,9 +63,16 @@ class WeightQuantizationConfig:
 
 
 def build_weight_quantization_config(raw_cfg: Any) -> WeightQuantizationConfig:
+    raw_method = str(_cfg_get(raw_cfg, "method", DEFAULT_WEIGHT_QUANT_METHOD))
+    if raw_method.lower() == DEFAULT_WEIGHT_QUANT_METHOD.lower():
+        method = DEFAULT_WEIGHT_QUANT_METHOD
+    elif raw_method.upper() == GPTQ_WEIGHT_QUANT_METHOD:
+        method = GPTQ_WEIGHT_QUANT_METHOD
+    else:
+        method = raw_method
     cfg = WeightQuantizationConfig(
         enable=bool(_cfg_get(raw_cfg, "enable", False)),
-        method=str(_cfg_get(raw_cfg, "method", DEFAULT_WEIGHT_QUANT_METHOD)),
+        method=method,
         q_bits=int(_cfg_get(raw_cfg, "q_bits", 4)),
         group_size=int(_cfg_get(raw_cfg, "group_size", 128)),
         sym=bool(_cfg_get(raw_cfg, "sym", True)),
@@ -282,3 +293,33 @@ class FLexGenLinearQuantizer:
             "act_order": self.cfg.act_order,
             "static_groups": self.cfg.static_groups,
         }
+
+
+class GPTQLinearQuantizer(FLexGenLinearQuantizer):
+    """Explicit GPTQ entrypoint using the existing second-order implementation."""
+
+    def _find_params(
+        self,
+        weight_slice: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        maxq = torch.tensor(
+            2**self.cfg.q_bits - 1,
+            device=weight_slice.device,
+            dtype=weight_slice.dtype,
+        )
+        absmax = weight_slice.abs().amax(dim=1, keepdim=True)
+        safe_absmax = torch.where(absmax == 0, torch.ones_like(absmax), absmax)
+        scale = (2.0 * safe_absmax) / maxq
+        zero = torch.full_like(scale, (float(maxq.item()) + 1.0) / 2.0)
+        return scale, zero, maxq
+
+    def quantize(self) -> Dict[str, Any]:
+        if self.nsamples <= 0:
+            raise RuntimeError(
+                "GPTQ received no calibration activations for this layer."
+            )
+        if not torch.isfinite(self.H).all():
+            raise RuntimeError("GPTQ Hessian contains non-finite values.")
+        if int(torch.count_nonzero(torch.diag(self.H)).item()) == 0:
+            raise RuntimeError("GPTQ calibration observed only zero-valued inputs.")
+        return super().quantize()

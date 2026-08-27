@@ -32,7 +32,7 @@ class BenchCase:
     name: str
     config_path: Path | None
     fused: bool = False
-    fused_backend: str = "triton"
+    fused_backend: str = "cuda-direct"
 
 
 def _load_infinity_runtime():
@@ -78,7 +78,7 @@ def _build_parser(add_common_arguments) -> argparse.ArgumentParser:
     parser.add_argument("--config-8", default=str(_config_for_bits(8)))
     parser.add_argument("--config-4", default=str(_config_for_bits(4)))
     parser.add_argument("--config-2", default=str(_config_for_bits(2)))
-    parser.add_argument("--fused-backend", default="cuda-direct", choices=("triton", "cuda", "cuda-direct"))
+    parser.add_argument("--fused-backend", default="cuda-direct", choices=("cuda", "cuda-direct"))
     parser.add_argument("--profile", default="", help="if set to a case name, torch.profiler one generation of that case and print top CUDA ops by self time")
     parser.add_argument("--cprofile", default="", help="if set to a case name, cProfile one generation and print top Python fns by tottime (CPU-side overhead)")
     parser.add_argument("--save-dir", default="", help="optional directory for first image from each case")

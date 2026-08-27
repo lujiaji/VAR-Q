@@ -84,10 +84,8 @@ class VARQConfig:
         checkpoint_config = self.get_checkpoint_config()
         vae_ckpt = checkpoint_config['vae_ckpt']
         
-        # For Infinity models, use model_path directly
         if 'model_path' in checkpoint_config:
             model_ckpt = checkpoint_config['model_path']
-        # For VAR models, use template with model_depth
         elif 'var_ckpt_template' in checkpoint_config and model_depth is not None:
             model_ckpt = checkpoint_config['var_ckpt_template'].format(model_depth)
         else:

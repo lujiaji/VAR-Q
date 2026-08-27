@@ -25,9 +25,6 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-triton = [
-  "triton",
-]
 dev = [
   "pytest",
 ]
@@ -38,7 +35,7 @@ Documentation = "https://github.com/lujiaji/VAR-Q#readme"
 Issues = "https://github.com/lujiaji/VAR-Q/issues"
 
 [tool.setuptools.packages.find]
-include = ["VAR_Q*"]
+include = ["VAR_Q*", "ablation*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

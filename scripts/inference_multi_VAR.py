@@ -7,7 +7,6 @@ import argparse
 import numpy as np
 import PIL.Image as PImage, PIL.ImageDraw as PImageDraw
 
-# Resolve repository root from this file instead of the caller's cwd.
 THIS_DIR = osp.dirname(osp.abspath(__file__))
 VARQ_ROOT = osp.dirname(THIS_DIR)
 if VARQ_ROOT not in sys.path:
@@ -25,15 +24,13 @@ VAR_REPO_ROOT = require_third_party_repo("VAR", "https://github.com/FoundationVi
 prepend_sys_path([VARQ_ROOT, VAR_REPO_ROOT.parent])
 os.chdir(VARQ_ROOT)
 
-setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)     # disable default parameter init for faster speed
-setattr(torch.nn.LayerNorm, 'reset_parameters', lambda self: None)  # disable default parameter init for faster speed
+setattr(torch.nn.Linear, 'reset_parameters', lambda self: None)
+setattr(torch.nn.LayerNorm, 'reset_parameters', lambda self: None)
 
-# Import configuration system and models
 from VAR_Q.config_loader import load_varq_config
 from VAR.models import build_vae_var_from_config
 from VAR.utils.misc import create_npz_from_sample_folder
 
-# Create simple argparser - most parameters now in config
 parser = argparse.ArgumentParser(description='VAR-Q Multi-Image Inference')
 parser.add_argument(
     "--config",
@@ -55,23 +52,19 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-# Load configuration
 config = load_varq_config(args.config)
 
-# Add batch processing parameters to config if not present
 if 'batch_processing' not in config.config:
     config.config['batch_processing'] = {
         'total_iters': 1000,
         'batch_size': 50
     }
 
-# Override config with command line arguments
 if args.total_iters is not None:
     config.config['batch_processing']['total_iters'] = args.total_iters
 if args.batch_size is not None:
     config.config['batch_processing']['batch_size'] = args.batch_size
 
-# Get final configuration values
 model_depth = config.get_model_config()['depth']
 assert model_depth in {16, 20, 24, 30, 36}
 
@@ -95,15 +88,12 @@ def require_checkpoint(local_path: str):
 require_checkpoint(vae_ckpt)
 require_checkpoint(var_ckpt)
 
-# Get device from config
 device = config.get_device()
 print(f"Using device: {device}")
 
-# Build models using configuration
 print("Building models from configuration...")
 vae, var = build_vae_var_from_config(config.config, device=device)
 
-# Load checkpoints
 print("Loading checkpoints...")
 vae.load_state_dict(torch.load(vae_ckpt, map_location='cpu'), strict=True)
 var.load_state_dict(torch.load(var_ckpt, map_location='cpu'), strict=True)
@@ -122,7 +112,6 @@ print(f'Model preparation finished.')
 if args.profile_memory:
     reset_cuda_memory_stats()
 
-# Get inference parameters from config
 inference_config = config.get_inference_config()
 seed = inference_config['seed']
 cfg = inference_config['cfg']
@@ -130,13 +119,11 @@ top_k = inference_config['top_k']
 top_p = inference_config['top_p']
 more_smooth = inference_config['more_smooth']
 
-# Get batch processing parameters
 batch_config = config.config.get('batch_processing', {})
 images_per_iter = batch_config.get('batch_size', 50)
 total_iters = batch_config.get('total_iters', 1000)
 save_path = args.save_path
 
-# Create save directory if it doesn't exist
 os.makedirs(save_path, exist_ok=True)
 
 print(f"Inference parameters:")
@@ -150,21 +137,19 @@ print(f"  Batch size: {images_per_iter}")
 print(f"  Total iterations: {total_iters}")
 print(f"  Save path: {save_path}")
 
-# seed
 torch.manual_seed(seed)
 random.seed(seed)
 np.random.seed(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# run faster
 tf32 = True
 torch.backends.cudnn.allow_tf32 = bool(tf32)
 torch.backends.cuda.matmul.allow_tf32 = bool(tf32)
 torch.set_float32_matmul_precision('high' if tf32 else 'highest')
 
 with torch.inference_mode():
-    with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):    # using bfloat16 can be faster
+    with torch.autocast('cuda', enabled=True, dtype=torch.float16, cache_enabled=True):
         for step in range(total_iters):
             print(f"Generating {images_per_iter} images for class {step}...")
             label_B = torch.full((images_per_iter,), step, dtype=torch.long, device=device)

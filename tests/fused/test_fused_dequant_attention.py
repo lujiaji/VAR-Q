@@ -1,14 +1,13 @@
 import pytest
 import torch
 
-from tests.fused import oracle
+from . import oracle
 
 
 cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 
 def test_import_exists():
-    # Red until VAR_Q/fused/flash_dequant.py defines the symbol.
     from VAR_Q.fused import fused_dequant_attention
     assert callable(fused_dequant_attention)
 
@@ -21,7 +20,7 @@ def test_invalid_backend_rejected():
 
 def test_backend_aliases():
     from VAR_Q.fused.flash_dequant import _normalize_backend
-    assert _normalize_backend("triton") == "triton"
+    assert _normalize_backend("triton") == "cuda_direct"
     assert _normalize_backend("cuda") == "cuda"
     assert _normalize_backend("cuda-direct") == "cuda_direct"
     assert _normalize_backend("fused_cuda") == "cuda"

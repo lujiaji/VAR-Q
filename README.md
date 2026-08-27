@@ -41,12 +41,52 @@ Weight quantization methods such as GPTQ, AWQ, and related approaches are orthog
 
 ## ✨ Highlights
 
-- **Runtime hook integration**: VAR, Infinity, InfinityStar, and LiveTalk are instrumented in memory after model construction; no forked backend source is distributed.
+- **Runtime hook integration**: VAR, Infinity, InfinityStar, LiveTalk, Self-Forcing, and LongLive are instrumented in memory after model construction; no forked backend source is distributed.
 - **Main VAR-Q method**: supports `VARQ`, all `G_*` grouping variants, ratio-controlled grouping, pre-RoPE control, and low-bit KV cache packing/unpacking.
-- **Memory-conscious runtime**: stores compact scale metadata, avoids token-expanded scale caches, supports exact cache preallocation, and uses fused Triton unpack/dequant on CUDA when available.
-- **Clean ablation boundary**: KIVI, FLexGen, and KVQuant comparison implementations live under `ablation/`; the pip-installed core package remains `VAR_Q`.
+- **Memory-conscious runtime**: stores compact scale metadata, avoids token-expanded scale caches, supports exact cache preallocation, and uses compiled CUDA quant/pack/unpack/dequant operators on CUDA.
+- **Clean ablation boundary**: KIVI, FLexGen, sparse-attention, and GPTQ W4/A8 reference implementations live under `ablation/` and are installed as an optional comparison package alongside `VAR_Q`.
 - **Backend-friendly release**: third-party model repositories, checkpoints, generated media, and experiment scratch files are ignored by default.
-- **Minimal core dependency**: the VAR-Q core only depends on PyTorch/Triton-level tensor operations; backend-specific environments should follow the upstream model repositories.
+- **Minimal core dependency**: Python import and CPU reference execution only depend on PyTorch; CUDA inference uses the bundled CUDA extension. Backend-specific environments should follow the upstream model repositories.
+
+## 📊 Deployment Results
+
+Reported A100-80GB evaluations show approximately **75% KV-cache reduction at
+INT4** and up to **87% at INT2**. The reduced cache enables substantially larger
+full-generation batches across image and video backends.
+
+| Model | INT4 KV-cache reduction | BF16 max batch | Largest verified VAR-Q batch |
+| --- | ---: | ---: | ---: |
+| Infinity-8B | 74.8% | 3 | 16 (INT4), 22 (INT2) |
+| Self-Forcing | 74.9% | 8 | 16 (INT4) |
+| LongLive | 74.9% | 4 | 8 (INT3) |
+| InfinityStar-480p | 73.5% | 1 | 3 (INT2) |
+| VAR-d30 | 72.9% | 134 | 543 (INT2) |
+
+For Infinity-8B, the effective compression ratios below include scale metadata:
+
+| KV precision | Effective KV compression |
+| --- | ---: |
+| INT4 | 3.97x |
+| INT3 | 4.95x |
+| INT2 | 7.88x |
+
+KV-cache reduction refers to persistent K/V storage rather than whole-process
+peak GPU allocation. Maximum batch is the largest completed full-generation
+run under each reported precision.
+
+### Fused-kernel overhead reduction
+
+On Infinity-8B at batch size 1, fusing packed-KV loading, unpacking, and
+dequantization into attention reduces both attention-path and end-to-end
+latency relative to the same quantized runtime without fusion:
+
+| KV precision | Attention, unfused -> fused | Attention improvement | E2E, unfused -> fused | E2E improvement |
+| --- | ---: | ---: | ---: | ---: |
+| INT8 | 1951 -> 1603 ms | 17.8% | 3973 -> 3627 ms | 8.7% |
+| INT4 | 1999 -> 1583 ms | 20.8% | 4012 -> 3596 ms | 10.4% |
+
+The speedups above compare fused and unfused quantized execution. They do not
+claim that quantized execution is faster than the BF16 reference (3164 ms E2E).
 
 ## 🧩 Supported Backends
 
@@ -56,10 +96,12 @@ Weight quantization methods such as GPTQ, AWQ, and related approaches are orthog
 | Infinity | https://github.com/FoundationVision/Infinity | `third_party/Infinity` | Automatic runtime hook |
 | InfinityStar | https://github.com/FoundationVision/InfinityStar | `third_party/InfinityStar` | Automatic runtime hook |
 | LiveTalk | https://github.com/ChenhongyiYang/LiveTalk | `third_party/LiveTalk` | Automatic runtime hook |
-| Self-Forcing | https://github.com/guandeh17/Self-Forcing | `third_party/Self-Forcing` | `VideoKVCacheAdapter` integration API |
-| LongLive | https://github.com/NVlabs/LongLive | `third_party/LongLive` | `VideoKVCacheAdapter` integration API |
+| Self-Forcing | https://github.com/guandeh17/Self-Forcing | `third_party/Self-Forcing` | Automatic packed-KV hook |
+| LongLive | https://github.com/NVlabs/LongLive | `third_party/LongLive` | Automatic segmented packed-KV hook |
 
-VAR, Infinity, InfinityStar, and LiveTalk entrypoints install hooks at runtime and do not require a committed patch to their upstream repositories. Self-Forcing and LongLive currently expose a backend integration adapter because their K/V tensors are owned by version-sensitive video attention loops; an upstream caller must invoke the adapter where those tensors are available.
+All listed entrypoints install hooks at runtime and do not require a committed
+patch to their upstream repositories. Standard Wan2.1/Wan2.2 diffusion is not
+listed because it does not maintain a persistent autoregressive KV cache.
 
 For backends using the general hook router, VAR-Q and ablation methods are selected through the same attachment point while their quantization implementations remain isolated: VAR-Q is implemented in `VAR_Q/`, and comparisons remain in `ablation/`.
 
@@ -72,7 +114,9 @@ VAR-Q/
 │   ├── pack_unpack.py      # Low-bit pack/unpack utilities
 │   ├── config_loader.py    # Public JSON normalization
 │   ├── paths.py            # Relative third-party path helpers
-│   └── hooks/              # SmoothQuant-style hook installer
+│   ├── fused/              # Packed-KV attention Python API
+│   ├── csrc/               # CUDA quant/pack/unpack/attention extension
+│   └── hooks/              # Model hook installers
 ├── ablation/               # KIVI / FLexGen / KVQuant implementations
 ├── Benchmark/              # Public evaluation entrypoints
 ├── configs/                # Curated JSON configs
@@ -113,11 +157,14 @@ conda activate <your-backend-env>
 pip install -e .
 ```
 
-Triton is optional acceleration for low-bit pack/unpack and fused unpack/dequant on CUDA. Without Triton, `import VAR_Q` still works and pack/unpack falls back to the PyTorch implementation.
+Build the bundled CUDA extension before CUDA inference:
 
 ```bash
-pip install -e ".[triton]"
+bash scripts/bench/build_fused_flash.sh
 ```
+
+`import VAR_Q` and the CPU reference path remain available on CPU-only hosts;
+CUDA tensors never fall back to Triton or a Python pack/unpack implementation.
 
 For a non-editable minimal convenience install after PyTorch is already installed, `requirements-varq.txt` is retained:
 
@@ -125,13 +172,13 @@ For a non-editable minimal convenience install after PyTorch is already installe
 pip install -r requirements-varq.txt
 ```
 
-VAR-Q itself only needs PyTorch for the fallback path and can use Triton when available. VAR, Infinity, InfinityStar, Self-Forcing, and LongLive may pin different CUDA, PyTorch, `flash-attn`, `xformers`, tokenizer, or evaluation package versions; install those dependencies inside each official upstream repository instead of putting them into the VAR-Q root environment metadata.
+VAR-Q itself only needs PyTorch for CPU import/reference use and a compatible CUDA toolchain for CUDA inference. VAR, Infinity, InfinityStar, Self-Forcing, and LongLive may pin different CUDA, PyTorch, `flash-attn`, `xformers`, tokenizer, or evaluation package versions; install those dependencies inside each official upstream repository instead of putting them into the VAR-Q root environment metadata.
 
 ## 🧪 Tested Environments
 
 | Component | Environment | Notes |
 | --- | --- | --- |
-| VAR-Q core smoke tests | Python 3.10, PyTorch, Triton | CPU works for public tests; CUDA is used when available. |
+| VAR-Q core smoke tests | Python 3.10, PyTorch | CPU works for public tests; CUDA extension tests run when CUDA is available. |
 | VAR / Infinity / InfinityStar | Follow official backend environments | Install VAR-Q with `pip install -e .` inside the backend env. |
 | Self-Forcing / LongLive | Follow official backend environments | Video stacks may require separate CUDA/PyTorch package sets. |
 | CI | Ubuntu latest, Python 3.10 | Runs only py_compile and public smoke tests. |
@@ -149,7 +196,8 @@ git clone https://github.com/guandeh17/Self-Forcing third_party/Self-Forcing
 git clone https://github.com/NVlabs/LongLive third_party/LongLive
 ```
 
-VAR-Q does not vendor third-party source or distribute patch files. VAR, Infinity, InfinityStar, and LiveTalk launchers load the backend model and install hooks in memory. Self-Forcing and LongLive use the adapter API shown below until stable automatic hook signatures are available for those backends.
+VAR-Q does not vendor third-party source or distribute patch files. Public
+launchers load the backend model and install hooks in memory.
 
 Checkpoints are intentionally not stored in JSON configs. Provide them through command-line arguments, environment variables, or the upstream backend's native loader.
 
@@ -191,31 +239,18 @@ handle = install_livetalk_hooks(pipeline, quant_config)
 remove_livetalk_hooks(handle)
 ```
 
-For next-frame video backends whose attention internals differ across releases, such as Self-Forcing and LongLive, use the backend-agnostic KV adapter inside the backend attention path after K/V tensors are produced:
+Self-Forcing and LongLive expose direct installers. Their launchers call these
+automatically after the upstream pipeline has been constructed:
 
 ```python
-from VAR_Q.hooks import VideoKVCacheAdapter
+from VAR_Q.hooks import install_longlive_hooks, install_self_forcing_hooks
 
-# Or use VideoKVCacheAdapter.from_env() with VARQ_CONFIG_FILE exported by
-# scripts/inference_SelfForcing.sh and scripts/inference_LongLive.sh.
-kv_adapter = VideoKVCacheAdapter(quant_config)
-
-# Inside the backend attention loop, after current k/v are computed:
-k, v = kv_adapter.update(
-    k,
-    v,
-    scale_idx=current_chunk_idx,
-    num_scales=num_chunks,
-)
-
-# Run the backend's normal attention with the returned k/v.
+sf_handle = install_self_forcing_hooks(sf_pipeline, "configs/self_forcing/varq/base/SF-VARQ-4.json")
+ll_handle = install_longlive_hooks(ll_pipeline, "configs/longlive/varq/base/LL-VARQ-4.json")
 ```
 
-The adapter supports the same `VARQ`, `G_*`, `KIVI`, `FLexGen`, and `KVQuant`
-method names, keeps `max_scale_seq_len=1560` as the default video chunk unit,
-and skips persistent caching for the final chunk by default.
-
-This adapter is a public integration API rather than an automatic hook: a backend wrapper or upstream integration point must call `update(...)`.
+The underlying `VideoKVCacheAdapter` remains available as an integration API
+for additional causal video models.
 
 ## 🧠 Memory-Efficient Runtime
 
@@ -224,7 +259,7 @@ VAR-Q reduces active cache allocations in addition to reporting packed byte coun
 - Scale metadata is stored compactly per group rather than expanded over every token.
 - Packed K/V buffers can be preallocated with `expected_total_seq_len` and `preallocate_kv_cache` when the generation length is known.
 - `quant_compute_dtype="native"` and `dequant_dtype="native"` avoid unnecessary full-size FP32 or cast temporaries.
-- CUDA + Triton uses fused unpack/dequant for supported low-bit formats; CPU and non-Triton execution retain the PyTorch fallback.
+- CUDA uses compiled quantize+pack, pack, unpack, unpack+dequant, and packed-KV attention operators; CPU execution retains a small PyTorch reference path.
 - `dequant_workspace_policy="release"` avoids retaining dense dequant workspaces between attention calls.
 
 For memory measurements, enable the entrypoint's profiling option where available. Reports include packed K/V bytes, scale bytes, dequant workspace bytes, and PyTorch allocated/reserved peaks. Compare backends using identical prompts, generation schedules, batch size, dtype, and a clean CUDA device.
@@ -262,12 +297,13 @@ bash scripts/inference_InfinityStar.sh \
   --output scripts/output/infinitystar_varq_demo.mp4
 ```
 
-Self-Forcing runs in the official upstream Self-Forcing environment. Pass the upstream inference command after `--`:
+Self-Forcing runs its upstream `inference.py` by default. Arguments after `--`
+are forwarded directly to that script:
 
 ```bash
 bash scripts/inference_SelfForcing.sh \
   configs/self_forcing/varq/base/SF-VARQ-4.json \
-  -- python <upstream_self_forcing_inference.py> <upstream args>
+  -- <upstream inference arguments>
 ```
 
 LongLive follows the same pattern:
@@ -275,15 +311,14 @@ LongLive follows the same pattern:
 ```bash
 bash scripts/inference_LongLive.sh \
   configs/longlive/varq/base/LL-VARQ-4.json \
-  -- python <upstream_longlive_inference.py> <upstream args>
+  -- <upstream inference arguments>
 ```
 
 LiveTalk:
 
 ```bash
-python scripts/run_livetalk_varq.py \
+bash scripts/inference_LiveTalk.sh 4 -- \
   --checkpoint_root /path/to/livetalk/checkpoints \
-  --bits 4 \
   --output scripts/output/livetalk_varq_demo.mp4
 ```
 
@@ -324,11 +359,11 @@ Retained public configs include:
 
 | Backend | VAR-Q configs | Ablation configs | Extra configs |
 | --- | --- | --- | --- |
-| VAR | 8/4/3-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM` |
-| Infinity | 8/4/3/2-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM` |
-| InfinityStar | 8/4-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM`, ratio 1/2 and 1/3 |
-| Self-Forcing | 8/4/3-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM`, 4/3-bit ratio 1/2, 1/4, 1/8 |
-| LongLive | 8/4/3-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM`, 4/3-bit ratio 1/2, 1/4, 1/8 |
+| VAR | 8/6/4/3-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM` |
+| Infinity | 8/6/4/3/2-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM` |
+| InfinityStar | 8/6/4-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM`, ratio 1/2 and 1/3 |
+| Self-Forcing | 8/6/4/3/2-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM`, 4/3-bit ratio 1/2, 1/4, 1/8 |
+| LongLive | 8/6/4/3/2-bit | KIVI 4-bit, FLexGen 4-bit | `G_HEAD_DIM`, 4/3-bit ratio 1/2, 1/4, 1/8 |
 
 For next-frame video backends such as Self-Forcing and LongLive, `max_scale_seq_len=1560` is the default grouping unit. If `compression_ratio` is omitted, it defaults to `1`, so the group length is 1560. `compression_ratio=3` represents grouping the full 4680-token chunk.
 
@@ -346,12 +381,11 @@ The smoke tests cover pack/unpack, quant/dequant shape checks, config loading, a
 ## 🗺️ TODO
 
 - Support more visual autoregressive backends.
-- Promote Self-Forcing and LongLive from adapter integration to automatic runtime hooks.
 - Improve GPU memory fragmentation behavior during long generation.
 - Add more backend version signatures for robust hook detection.
 - Extend fused kernels and attention-path workspace reuse for additional backends.
 - Publish standardized end-to-end memory and throughput benchmarks.
-- Expand end-to-end smoke tests for video generation backends.
+- Add native adapters for additional autoregressive video models.
 - Add config inheritance/snippet support so repeated quantization blocks can be shared more compactly.
 
 ## 📚 Citation

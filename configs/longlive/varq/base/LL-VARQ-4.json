@@ -5,6 +5,9 @@
   "qkv_format": "BLHc",
   "q_bits": 4,
   "pack_to_int32": true,
+  "enable_fused_kv_flashattn": true,
+  "fused_kv_backend": "cuda_direct",
+  "fused_kv_strict": true,
   "dequant_dtype": "bf16",
   "trace_events": false,
   "max_scale_seq_len": 1560

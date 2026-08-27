@@ -12,7 +12,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .weight_flexgen import DEFAULT_FLexGen_CACHE_DIR, FLexGenLinearQuantizer, WeightQuantizationConfig, build_weight_quantization_config
+from .weight_flexgen import (
+    DEFAULT_FLexGen_CACHE_DIR,
+    GPTQ_WEIGHT_QUANT_METHOD,
+    FLexGenLinearQuantizer,
+    GPTQLinearQuantizer,
+    WeightQuantizationConfig,
+    build_weight_quantization_config,
+)
 
 
 _BLOCK_PREFIX = "block"
@@ -58,6 +65,14 @@ def _cache_paths(cfg: WeightQuantizationConfig, model_tag: str) -> Tuple[Path, P
     cache_dir = root / _stable_model_tag(model_tag)
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / "flexgen_q4_g128_fake.pt", cache_dir / ".flexgen.lock"
+
+
+def _gptq_cache_paths(cfg: WeightQuantizationConfig, model_tag: str) -> Tuple[Path, Path]:
+    root = Path(cfg.cache_dir or DEFAULT_FLexGen_CACHE_DIR).expanduser().resolve()
+    cache_dir = root / _stable_model_tag(model_tag)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"gptq_q4_g{cfg.group_size}_fake"
+    return cache_dir / f"{stem}.pt", cache_dir / f".{stem}.lock"
 
 
 @contextlib.contextmanager
@@ -184,14 +199,18 @@ class BlockwisePlan:
             self.cleanup = None
 
 
-def _quantize_plan(plan: BlockwisePlan, cfg: WeightQuantizationConfig) -> Dict[str, Any]:
+def _quantize_plan(
+    plan: BlockwisePlan,
+    cfg: WeightQuantizationConfig,
+    quantizer_type=FLexGenLinearQuantizer,
+) -> Dict[str, Any]:
     summary: Dict[str, Any] = {"family": plan.family, "blocks": []}
     try:
         for block_index, block in enumerate(plan.blocks):
             block_info = {"block_index": block_index, "linears": []}
             linears = _collect_block_linears(block)
             for linear_name, linear in linears:
-                quantizer = FLexGenLinearQuantizer(linear, cfg)
+                quantizer = quantizer_type(linear, cfg)
 
                 def _hook(_module, inputs, _output, flexgen=quantizer):
                     if not inputs:
@@ -258,12 +277,18 @@ def _build_var_plan(model: nn.Module) -> BlockwisePlan:
     return BlockwisePlan(family="var", blocks=blocks, states=states, run_block=run_block)
 
 
-def _build_infinity_plan(model: nn.Module, args: Any) -> BlockwisePlan:
+def _build_infinity_plan(
+    model: nn.Module,
+    args: Any,
+    calibration_prompts: Optional[Sequence[str]] = None,
+) -> BlockwisePlan:
     from infinity.utils.dynamic_resolution import dynamic_resolution_h_w, h_div_w_templates
     from transformers import AutoTokenizer, T5EncoderModel
 
     blocks = list(model.unregistered_blocks if hasattr(model, "unregistered_blocks") else model.blocks)
-    prompts = _build_infinity_calibration_prompts()
+    prompts = list(calibration_prompts) if calibration_prompts is not None else _build_infinity_calibration_prompts()
+    if not prompts:
+        raise ValueError("Infinity weight calibration requires non-empty prompts.")
     batch_size = 2 if "8b" in str(getattr(args, "model_type", "")).lower() else 4
     device = model.pos_start.device
     scale_template = float(getattr(args, "h_div_w_template", 1.0))
@@ -361,12 +386,18 @@ def _build_infinity_plan(model: nn.Module, args: Any) -> BlockwisePlan:
     return BlockwisePlan(family="infinity", blocks=blocks, states=states, run_block=run_block, cleanup=cleanup)
 
 
-def _build_infinitystar_plan(model: nn.Module, args: Any) -> BlockwisePlan:
+def _build_infinitystar_plan(
+    model: nn.Module,
+    args: Any,
+    calibration_prompts: Optional[Sequence[str]] = None,
+) -> BlockwisePlan:
     from transformers import AutoTokenizer, T5EncoderModel
 
-    prompts = _build_moviegen_prompts(8)
-    if not prompts:
+    prompts = list(calibration_prompts) if calibration_prompts is not None else _build_moviegen_prompts(8)
+    if not prompts and calibration_prompts is None:
         prompts = [f"InfinityStar calibration prompt {idx}" for idx in range(8)]
+    if not prompts:
+        raise ValueError("InfinityStar weight calibration requires non-empty prompts.")
     blocks = list(model.unregistered_blocks if hasattr(model, "unregistered_blocks") else model.blocks)
     batch_size = 2
     device = model.word_embed.weight.device
@@ -433,10 +464,24 @@ def _build_infinitystar_plan(model: nn.Module, args: Any) -> BlockwisePlan:
     return BlockwisePlan(family="infinitystar", blocks=blocks, states=states, run_block=run_block, cleanup=cleanup)
 
 
-def _build_wan_plan(model: nn.Module, text_encoder: nn.Module, prompt_limit: int, family: str) -> BlockwisePlan:
+def _build_wan_plan(
+    model: nn.Module,
+    text_encoder: nn.Module,
+    prompt_limit: int,
+    family: str,
+    calibration_prompts: Optional[Sequence[str]] = None,
+) -> BlockwisePlan:
     from wan.modules.model import sinusoidal_embedding_1d
 
-    prompts = _build_moviegen_prompts(prompt_limit)
+    prompts = (
+        list(calibration_prompts)[:prompt_limit]
+        if calibration_prompts is not None
+        else _build_moviegen_prompts(prompt_limit)
+    )
+    if not prompts:
+        raise ValueError(
+            f"{family} weight calibration requires non-empty calibration_prompts."
+        )
     blocks = list(model.blocks)
     device = model.patch_embedding.weight.device
     frame_count = 3
@@ -522,11 +567,25 @@ def _build_plan(model: nn.Module, family: str, **kwargs) -> BlockwisePlan:
     if family == "var":
         return _build_var_plan(model)
     if family == "infinity":
-        return _build_infinity_plan(model, kwargs["args"])
+        return _build_infinity_plan(
+            model,
+            kwargs["args"],
+            kwargs.get("calibration_prompts"),
+        )
     if family == "infinitystar":
-        return _build_infinitystar_plan(model, kwargs["args"])
+        return _build_infinitystar_plan(
+            model,
+            kwargs["args"],
+            kwargs.get("calibration_prompts"),
+        )
     if family in {"self_forcing", "longlive"}:
-        return _build_wan_plan(model, kwargs["text_encoder"], 16 if family == "self_forcing" else 8, family)
+        return _build_wan_plan(
+            model,
+            kwargs["text_encoder"],
+            16 if family == "self_forcing" else 8,
+            family,
+            kwargs.get("calibration_prompts"),
+        )
     return _build_synthetic_plan(model, family)
 
 
@@ -580,5 +639,107 @@ def maybe_apply_flexgen(
             "cache_path": str(cache_path),
             "model_tag": model_tag,
             "family": family,
+            "summary": summary,
+        }
+
+
+def maybe_apply_gptq(
+    model: nn.Module,
+    raw_cfg: Any,
+    model_tag: str,
+    family: str,
+    **kwargs,
+) -> Dict[str, Any]:
+    """Install a dequantized GPTQ W4 weight snapshot.
+
+    Text-conditioned model families require calibration prompts to be passed
+    explicitly (or embedded as ``calibration_prompts`` in the config).  This
+    keeps the release path independent of external prompt files.
+    """
+    if isinstance(raw_cfg, dict):
+        normalized_cfg = dict(raw_cfg)
+        normalized_cfg.setdefault("method", GPTQ_WEIGHT_QUANT_METHOD)
+    else:
+        normalized_cfg = raw_cfg
+    cfg = _resolve_weight_cfg(normalized_cfg)
+    if not cfg.enable:
+        return {"applied": False, "reason": "disabled"}
+    if cfg.method != GPTQ_WEIGHT_QUANT_METHOD:
+        raise ValueError(
+            f"maybe_apply_gptq requires method={GPTQ_WEIGHT_QUANT_METHOD}, got {cfg.method}"
+        )
+    if cfg.runtime_form != "fake":
+        raise ValueError("GPTQ release support is limited to runtime_form='fake'.")
+
+    calibration_prompts = kwargs.pop("calibration_prompts", None)
+    if calibration_prompts is None and isinstance(raw_cfg, dict):
+        calibration_prompts = raw_cfg.get("calibration_prompts")
+    if calibration_prompts is not None:
+        if isinstance(calibration_prompts, str):
+            raise TypeError("calibration_prompts must be a sequence of prompt strings")
+        calibration_prompts = [str(prompt) for prompt in calibration_prompts if str(prompt)]
+
+    cache_path, lock_path = _gptq_cache_paths(cfg, model_tag)
+    blocks = _resolve_target_blocks(model, family)
+    with _file_lock(lock_path):
+        if cache_path.exists():
+            payload = torch.load(cache_path, map_location="cpu")
+            _load_cached_weights(blocks, payload.get("weights", {}))
+            return {
+                "applied": True,
+                "source": "cache",
+                "cache_path": str(cache_path),
+                "model_tag": model_tag,
+                "family": family,
+                "weight_bits": 4,
+                "runtime_form": "fake",
+            }
+
+        if family != "var" and not calibration_prompts:
+            raise ValueError(
+                f"Fresh GPTQ calibration for family={family!r} requires explicit "
+                "calibration_prompts."
+            )
+        if family in {"self_forcing", "longlive"} and kwargs.get("text_encoder") is None:
+            raise ValueError(
+                f"Fresh GPTQ calibration for family={family!r} requires text_encoder."
+            )
+        if family in {"infinity", "infinitystar"} and kwargs.get("args") is None:
+            raise ValueError(
+                f"Fresh GPTQ calibration for family={family!r} requires model args."
+            )
+        plan = _build_plan(
+            model,
+            family,
+            calibration_prompts=calibration_prompts,
+            **kwargs,
+        )
+        summary = _quantize_plan(plan, cfg, quantizer_type=GPTQLinearQuantizer)
+        payload = {
+            "family": family,
+            "model_tag": model_tag,
+            "config": {
+                "method": GPTQ_WEIGHT_QUANT_METHOD,
+                "q_bits": cfg.q_bits,
+                "group_size": cfg.group_size,
+                "sym": cfg.sym,
+                "block_size": cfg.block_size,
+                "percdamp": cfg.percdamp,
+                "act_order": cfg.act_order,
+                "static_groups": cfg.static_groups,
+                "runtime_form": "fake",
+            },
+            "weights": _snapshot_quantized_weights(blocks),
+            "summary": summary,
+        }
+        torch.save(payload, cache_path)
+        return {
+            "applied": True,
+            "source": "fresh",
+            "cache_path": str(cache_path),
+            "model_tag": model_tag,
+            "family": family,
+            "weight_bits": 4,
+            "runtime_form": "fake",
             "summary": summary,
         }
