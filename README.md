@@ -48,6 +48,46 @@ Weight quantization methods such as GPTQ, AWQ, and related approaches are orthog
 - **Backend-friendly release**: third-party model repositories, checkpoints, generated media, and experiment scratch files are ignored by default.
 - **Minimal core dependency**: Python import and CPU reference execution only depend on PyTorch; CUDA inference uses the bundled CUDA extension. Backend-specific environments should follow the upstream model repositories.
 
+## 📊 Deployment Results
+
+Reported A100-80GB evaluations show approximately **75% KV-cache reduction at
+INT4** and up to **87% at INT2**. The reduced cache enables substantially larger
+full-generation batches across image and video backends.
+
+| Model | INT4 KV-cache reduction | BF16 max batch | Largest verified VAR-Q batch |
+| --- | ---: | ---: | ---: |
+| Infinity-8B | 74.8% | 3 | 16 (INT4), 22 (INT2) |
+| Self-Forcing | 74.9% | 8 | 16 (INT4) |
+| LongLive | 74.9% | 4 | 8 (INT3) |
+| InfinityStar-480p | 73.5% | 1 | 3 (INT2) |
+| VAR-d30 | 72.9% | 134 | 543 (INT2) |
+
+For Infinity-8B, the effective compression ratios below include scale metadata:
+
+| KV precision | Effective KV compression |
+| --- | ---: |
+| INT4 | 3.97x |
+| INT3 | 4.95x |
+| INT2 | 7.88x |
+
+KV-cache reduction refers to persistent K/V storage rather than whole-process
+peak GPU allocation. Maximum batch is the largest completed full-generation
+run under each reported precision.
+
+### Fused-kernel overhead reduction
+
+On Infinity-8B at batch size 1, fusing packed-KV loading, unpacking, and
+dequantization into attention reduces both attention-path and end-to-end
+latency relative to the same quantized runtime without fusion:
+
+| KV precision | Attention, unfused -> fused | Attention improvement | E2E, unfused -> fused | E2E improvement |
+| --- | ---: | ---: | ---: | ---: |
+| INT8 | 1951 -> 1603 ms | 17.8% | 3973 -> 3627 ms | 8.7% |
+| INT4 | 1999 -> 1583 ms | 20.8% | 4012 -> 3596 ms | 10.4% |
+
+The speedups above compare fused and unfused quantized execution. They do not
+claim that quantized execution is faster than the BF16 reference (3164 ms E2E).
+
 ## 🧩 Supported Backends
 
 | Backend | Upstream repository | Default checkout | Integration path |
